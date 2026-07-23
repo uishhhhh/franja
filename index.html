@@ -1,0 +1,2107 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Franja — metabuscador de vuelo, tren y bus</title>
+<meta name="description" content="Metabuscador de vuelo, tren y bus que ordena por cercanía a tu hora de salida.">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0B347E" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0B121C" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Franja">
+<!--
+==========================================================================================
+  FRANJA — metabuscador multimodal (avión / tren / bus)
+  Un archivo. Sin dependencias. Sin build. Se sube tal cual a GitHub Pages.
+
+  MODO POR DEFECTO: mock. La app es 100% funcional sin ninguna clave ni conexión real.
+
+  ------------------------------------------------------------------------------------
+  AVISO: AMADEUS SELF-SERVICE YA NO EXISTE
+  ------------------------------------------------------------------------------------
+  Amadeus decomisionó su portal self-service el 17 de julio de 2026: las claves quedaron
+  desactivadas y el alta de nuevos usuarios llevaba meses cerrada. Lo que queda de
+  Amadeus es Enterprise, o sea contrato comercial. El adaptador de vuelos ahora apunta a
+  Travelpayouts / Aviasales, que sigue siendo gratis y de alta instantánea.
+
+  ------------------------------------------------------------------------------------
+  PASAR A MODO LIVE (vuelos con precios reales)
+  ------------------------------------------------------------------------------------
+  1. Regístrate en travelpayouts.com y copia tu token de app.travelpayouts.com/profile/api-token
+  2. Despliega este proxy como Cloudflare Worker (plan gratuito; también vale Vercel,
+     Netlify o Deno Deploy con el mismo código adaptado). Hace falta sí o sí: CORS
+     bloquea la llamada directa desde el navegador y el token no puede vivir en el
+     cliente, porque cualquiera te quemaría el límite con él.
+
+     // worker.js
+     export default {
+       async fetch(req, env) {
+         const allow = (env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim());
+         const origin = req.headers.get('Origin') || '';
+         const cors = {
+           'Access-Control-Allow-Origin': allow.includes(origin) ? origin : (allow[0] || ''),
+           'Access-Control-Allow-Methods': 'GET,OPTIONS',
+           'Vary': 'Origin'
+         };
+         if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
+         const url = new URL(req.url);
+         if (url.pathname !== '/flights') return new Response('no', { status: 404, headers: cors });
+
+         // Lista blanca: nunca reenviar tal cual lo que llegue del cliente.
+         const ok = ['origin','destination','departure_at','return_at','one_way',
+                     'direct','limit','page','sorting','currency','market'];
+         const q = new URLSearchParams();
+         for (const k of ok) { const v = url.searchParams.get(k); if (v) q.set(k, v); }
+         q.set('token', env.TP_TOKEN);          // el token vive aquí, nunca en el repo
+
+         const r = await fetch('https://api.travelpayouts.com/aviasales/v3/prices_for_dates?' + q,
+                               { cf: { cacheTtl: 900, cacheEverything: true } });   // 15 min de caché
+         return new Response(await r.text(), {
+           status: r.status, headers: { ...cors, 'Content-Type': 'application/json' }
+         });
+       }
+     };
+
+     Secretos del Worker: TP_TOKEN (tu token) y ALLOWED_ORIGINS
+     (p.ej. "https://tuusuario.github.io"). Como variables cifradas, no en el código.
+
+  3. Cambia CONFIG.MODE a 'live' y CONFIG.PROXY_URL a la URL del Worker. Nada más.
+
+  ------------------------------------------------------------------------------------
+  LO QUE EL MODO LIVE *NO* ES
+  ------------------------------------------------------------------------------------
+  La Data API de Aviasales devuelve precios reales pero de CACHÉ, agrupados por fecha:
+  para un día concreto da el billete más barato por combinación, no todas las salidas
+  del día. Con dos o tres resultados por fecha, el filtro horario —que es el motivo de
+  existir de esta app— se queda sin material que ordenar.
+  Para un listado real de salidas hace falta la Aviasales Flight Search API (tiempo real
+  y multidestino), que es gratuita pero exige solicitar acceso y que te lo aprueben.
+  Mientras tanto: mock para desarrollar la interfaz, live para contrastar precios.
+==========================================================================================
+-->
+<style>
+:root{
+  --ground:#EDF1F5;
+  --card:#FFFFFF;
+  --ink:#0E1A2B;
+  --ink-2:#4A5A6E;
+  --muted:#7A8798;
+  --line:#D8E0E9;
+  --line-soft:#E8EDF2;
+  --navy:#0B347E;
+  --navy-ink:#FFFFFF;
+  --signal:#E0A100;
+  --signal-soft:#FBEFC9;
+  --air:#2F5BD8;
+  --rail:#0C7A62;
+  --bus:#B85312;
+  --ok:#0F6B45;
+  --err:#B3261E;
+  --r:12px;
+  --shadow:0 1px 2px rgba(14,26,43,.06), 0 6px 20px -12px rgba(14,26,43,.28);
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --ground:#0B121C; --card:#141C28; --ink:#E9EEF4; --ink-2:#A9B7C7; --muted:#7F8EA1;
+    --line:#26303E; --line-soft:#1D2634; --navy:#4C86F5; --navy-ink:#07101F;
+    --signal:#F0B429; --signal-soft:#3A2E0C;
+    --air:#6C93FF; --rail:#3FC0A0; --bus:#E58A46; --ok:#3FC08A; --err:#F2837B;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -14px rgba(0,0,0,.8);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--ground); color:var(--ink); font-family:var(--sans);
+  font-size:15px; line-height:1.45; -webkit-font-smoothing:antialiased;
+}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+.wrap{max-width:1060px;margin:0 auto;padding:0 14px 96px}
+.lbl{
+  font-size:10.5px; letter-spacing:.14em; text-transform:uppercase;
+  font-weight:700; color:var(--muted);
+}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+/* ---------- cabecera ---------- */
+header{
+  position:sticky;top:0;z-index:30;background:var(--ground);
+  border-bottom:1px solid var(--line);
+}
+.head-in{max-width:1060px;margin:0 auto;padding:10px 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{display:flex;align-items:baseline;gap:8px;margin-right:auto}
+.brand b{font-size:19px;font-weight:800;letter-spacing:-.03em}
+.brand span{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.modes{display:flex;gap:6px}
+.mode-btn{
+  display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;
+  border:1px solid var(--line);background:var(--card);font-size:13px;font-weight:600;
+  color:var(--muted);transition:.12s;
+}
+.mode-btn[aria-pressed="true"]{border-color:currentColor;background:var(--card)}
+.mode-btn[data-mode="air"][aria-pressed="true"]{color:var(--air)}
+.mode-btn[data-mode="rail"][aria-pressed="true"]{color:var(--rail)}
+.mode-btn[data-mode="bus"][aria-pressed="true"]{color:var(--bus)}
+.mode-btn.shake{animation:shake .3s}
+@keyframes shake{25%{transform:translateX(-4px)}75%{transform:translateX(4px)}}
+
+/* ---------- tarjetas base ---------- */
+.panel{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  box-shadow:var(--shadow);
+}
+.panel + .panel{margin-top:12px}
+.pad{padding:14px}
+hr.sep{border:0;border-top:1px solid var(--line-soft);margin:14px 0}
+
+/* ---------- formulario ---------- */
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:2px;background:var(--ground)}
+.seg button{
+  border:0;background:none;padding:5px 12px;border-radius:999px;font-size:13px;
+  font-weight:600;color:var(--ink-2)
+}
+.seg button[aria-pressed="true"]{background:var(--card);color:var(--ink);box-shadow:var(--shadow)}
+.field{display:flex;flex-direction:column;gap:5px}
+.field input,.field select{
+  border:1px solid var(--line);border-radius:9px;padding:9px 10px;background:var(--card);
+  width:100%;
+}
+.field.ac{position:relative}
+.ac-list{
+  position:absolute;top:100%;left:0;right:0;z-index:20;margin:4px 0 0;padding:4px;
+  list-style:none;background:var(--card);border:1px solid var(--line);border-radius:10px;
+  box-shadow:var(--shadow);max-height:270px;overflow:auto;
+}
+.ac-list li{
+  padding:8px 10px;border-radius:7px;cursor:pointer;display:flex;align-items:baseline;gap:8px;
+  font-size:14px;
+}
+.ac-list li[aria-selected="true"],.ac-list li:hover{background:var(--ground)}
+.ac-list li b{font-weight:600}
+.ac-list li span{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.ac-list li em{font-style:normal;font-size:12px;color:var(--muted)}
+.ac-empty{padding:10px;font-size:13px;color:var(--muted)}
+.field input:focus-visible,.field select:focus-visible,button:focus-visible,
+input[type=range]:focus-visible{outline:2px solid var(--navy);outline-offset:2px}
+.leg-row{display:grid;gap:10px;grid-template-columns:1fr;margin-bottom:10px}
+.leg-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.link-btn{border:0;background:none;color:var(--navy);font-size:12.5px;font-weight:600;padding:2px 0}
+.grid-2{display:grid;gap:10px;grid-template-columns:1fr 1fr}
+.swap{
+  border:1px solid var(--line);background:var(--card);border-radius:9px;
+  width:34px;height:34px;display:grid;place-items:center;color:var(--ink-2);
+}
+.cta{
+  width:100%;margin-top:14px;background:var(--navy);color:var(--navy-ink);border:0;
+  border-radius:10px;padding:13px;font-weight:700;font-size:15.5px;letter-spacing:-.01em;
+}
+.cta:hover{filter:brightness(1.08)}
+
+/* ---------- REGLA 24 H: el elemento firma ---------- */
+.ruler{position:relative;height:34px;margin-top:2px}
+.ruler .track{
+  position:absolute;top:12px;left:0;right:0;height:8px;border-radius:4px;
+  background:var(--line-soft);border:1px solid var(--line);
+}
+.ruler .fill{position:absolute;top:12px;height:8px;background:var(--navy);opacity:.85;border-radius:4px}
+.ruler .tick{position:absolute;top:22px;width:1px;height:5px;background:var(--line)}
+.ruler .tick-lbl{
+  position:absolute;top:27px;transform:translateX(-50%);font-size:9.5px;color:var(--muted);
+  font-family:var(--mono)
+}
+.ruler input[type=range]{
+  position:absolute;top:6px;left:0;width:100%;margin:0;height:20px;background:none;
+  -webkit-appearance:none;appearance:none;pointer-events:none;
+}
+.ruler input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;pointer-events:auto;width:20px;height:20px;border-radius:50%;
+  background:var(--card);border:2px solid var(--navy);box-shadow:var(--shadow);cursor:grab
+}
+.ruler input[type=range]::-moz-range-thumb{
+  pointer-events:auto;width:18px;height:18px;border-radius:50%;background:var(--card);
+  border:2px solid var(--navy);cursor:grab
+}
+.range-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.range-val{font-family:var(--mono);font-size:13px;font-weight:600}
+.switch{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);font-weight:600}
+.time-block{background:var(--ground);border:1px solid var(--line);border-radius:var(--r);padding:12px}
+.time-block .sub{font-size:12.5px;color:var(--muted);margin:2px 0 0}
+.exact-row{display:flex;gap:10px;align-items:flex-end}
+.exact-row .field{flex:0 0 130px}
+.note-strip{
+  font-size:12px;color:var(--ink-2);background:var(--signal-soft);
+  border-left:3px solid var(--signal);padding:7px 10px;border-radius:0 8px 8px 0;
+}
+
+/* ---------- estado de proveedores ---------- */
+.strip{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 10px}
+.pv{
+  display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:999px;
+  border:1px solid var(--line);background:var(--card);font-size:12.5px;font-weight:600;
+}
+.pv .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.pv[data-s="loading"] .dot{background:var(--signal);animation:pulse 1s infinite}
+.pv[data-s="ok"] .dot{background:var(--ok)}
+.pv[data-s="error"] .dot{background:var(--err)}
+.pv[data-s="error"]{border-color:var(--err);color:var(--err)}
+.pv[data-s="vacio"]{opacity:.62}
+.pv small{color:var(--muted);font-weight:600}
+@keyframes pulse{50%{opacity:.25}}
+
+/* ---------- barra de herramientas + chips ---------- */
+.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.tools .count{margin-right:auto;font-size:13px;color:var(--ink-2);font-weight:600}
+.btn{
+  border:1px solid var(--line);background:var(--card);border-radius:9px;padding:8px 12px;
+  font-size:13.5px;font-weight:600;
+}
+.btn.small{padding:5px 10px;font-size:12.5px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.chip{
+  display:inline-flex;align-items:center;gap:6px;background:var(--card);
+  border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;font-size:12.5px;
+  font-weight:600;
+}
+.chip button{border:0;background:var(--line-soft);border-radius:50%;width:18px;height:18px;
+  line-height:1;font-size:12px;color:var(--ink-2);display:grid;place-items:center}
+
+/* ---------- resultados ---------- */
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  box-shadow:var(--shadow);padding:13px;margin-bottom:10px;
+}
+.card-top{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.badge{
+  font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;font-weight:800;
+  padding:3px 7px;border-radius:5px;border:1px solid currentColor;
+}
+.badge[data-m="air"]{color:var(--air)} .badge[data-m="rail"]{color:var(--rail)} .badge[data-m="bus"]{color:var(--bus)}
+.carrier{font-size:13px;font-weight:600;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.price{margin-left:auto;text-align:right;flex:0 0 auto}
+.price b{font-size:20px;font-weight:800;letter-spacing:-.02em;font-family:var(--mono)}
+.price small{display:block;font-size:10.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;font-weight:700}
+.times{display:flex;align-items:center;gap:10px}
+.t{flex:0 0 auto}
+.t b{font-size:22px;font-weight:700;font-family:var(--mono);letter-spacing:-.02em;display:block;line-height:1.1}
+.t span{font-size:11.5px;color:var(--muted);font-weight:600}
+.t.arr{text-align:right}
+.mid{flex:1;text-align:center;position:relative;padding:0 4px}
+.mid .dur{font-size:11.5px;color:var(--ink-2);font-weight:600;font-family:var(--mono)}
+.mid .bar{height:1px;background:var(--line);margin:5px 0;position:relative}
+.mid .bar i{position:absolute;top:-2px;width:5px;height:5px;border-radius:50%;background:var(--line);transform:translateX(-50%)}
+.mid .stops{font-size:11.5px;color:var(--muted);font-weight:600}
+.plus1{font-size:10px;vertical-align:super;color:var(--signal);font-weight:800}
+.card-bottom{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
+.meta{font-size:12px;color:var(--muted);font-weight:600}
+.meta .d2d{color:var(--ink-2)}
+.card-bottom .actions{margin-left:auto;display:flex;gap:7px}
+.delta{
+  font-family:var(--mono);font-size:12px;font-weight:700;padding:2px 7px;border-radius:5px;
+  background:var(--signal-soft);color:var(--ink);border:1px solid var(--signal);
+}
+.delta.zero{background:transparent;border-color:var(--line);color:var(--ok)}
+/* mini regla de la tarjeta */
+.mini{position:relative;height:14px;margin-top:11px}
+.mini .m-track{position:absolute;top:6px;left:0;right:0;height:3px;background:var(--line-soft);border-radius:2px}
+.mini .m-win{position:absolute;top:6px;height:3px;background:var(--line);border-radius:2px}
+.mini .m-dot{position:absolute;top:1px;width:13px;height:13px;border-radius:50%;border:3px solid var(--card);transform:translateX(-50%)}
+.mini .m-dot[data-m="air"]{background:var(--air)} .mini .m-dot[data-m="rail"]{background:var(--rail)} .mini .m-dot[data-m="bus"]{background:var(--bus)}
+.mini .m-mark{position:absolute;top:0;width:2px;height:14px;background:var(--signal);transform:translateX(-50%)}
+.skel{height:96px;border-radius:var(--r);background:linear-gradient(90deg,var(--line-soft),var(--card),var(--line-soft));
+  background-size:200% 100%;animation:sh 1.2s infinite;margin-bottom:10px;border:1px solid var(--line)}
+@keyframes sh{to{background-position:-200% 0}}
+
+/* ---------- vacíos ---------- */
+.empty{text-align:center;padding:34px 18px}
+.empty h3{margin:0 0 6px;font-size:17px;letter-spacing:-.02em}
+.empty p{margin:0 auto 14px;max-width:44ch;color:var(--ink-2);font-size:14px}
+
+/* ---------- panel lateral de filtros ---------- */
+.scrim{position:fixed;inset:0;background:rgba(14,26,43,.45);z-index:40;opacity:0;pointer-events:none;transition:.2s}
+.scrim.on{opacity:1;pointer-events:auto}
+.sheet{
+  position:fixed;z-index:50;background:var(--card);display:flex;flex-direction:column;
+  inset:auto 0 0 0;max-height:88vh;border-radius:16px 16px 0 0;
+  transform:translateY(101%);transition:transform .22s ease;
+}
+.sheet.on{transform:none}
+.sheet[hidden]{display:none}   /* si no, display:flex gana a [hidden] y el panel se queda pegado */
+.sheet-head{display:flex;align-items:center;gap:10px;padding:14px;border-bottom:1px solid var(--line-soft)}
+.sheet-head h2{margin:0;font-size:16px;letter-spacing:-.02em}
+.sheet-body{overflow:auto;padding:14px;flex:1}
+.sheet-foot{padding:12px 14px;border-top:1px solid var(--line-soft);display:flex;gap:8px}
+.sheet-foot .cta{margin:0;flex:1}
+.opt{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:14px}
+.opt input{width:17px;height:17px;accent-color:var(--navy)}
+.opt .n{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--muted)}
+.opt.off{opacity:.42}
+.fgroup{margin-bottom:18px}
+.fgroup h4{margin:0 0 8px;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.slider-simple{width:100%;accent-color:var(--navy)}
+
+/* ---------- detalle ---------- */
+.seg-row{display:grid;grid-template-columns:56px 1fr;gap:12px;padding:9px 0}
+.seg-row .tcol{font-family:var(--mono);font-size:13.5px;font-weight:600}
+.seg-row .tcol span{display:block;color:var(--muted);font-weight:500}
+.seg-row .body b{display:block;font-size:14px}
+.seg-row .body span{font-size:12.5px;color:var(--ink-2)}
+.layover{font-size:12px;color:var(--bus);font-weight:600;padding:5px 0 5px 68px;border-left:0}
+.leg-title{font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:var(--muted);margin:12px 0 2px}
+.kv{display:flex;justify-content:space-between;font-size:13.5px;padding:4px 0}
+.kv span{color:var(--ink-2)}
+.kv b{font-family:var(--mono)}
+
+/* ---------- pie / laboratorio ---------- */
+.lab{margin-top:22px;font-size:13px}
+.lab summary{cursor:pointer;font-weight:700;font-size:12.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.lab .pad{padding-top:10px}
+.lab label{display:flex;align-items:center;gap:8px;padding:4px 0}
+footer{margin-top:18px;font-size:12px;color:var(--muted);line-height:1.6}
+#toast{
+  position:fixed;left:50%;bottom:22px;transform:translate(-50%,20px);z-index:99;
+  background:var(--ink);color:var(--ground);padding:9px 15px;border-radius:999px;font-size:13.5px;
+  font-weight:600;opacity:0;transition:.2s;pointer-events:none;max-width:90vw;text-align:center;
+}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+
+@media (min-width:720px){
+  .leg-row{grid-template-columns:1fr 34px 1fr 150px}
+  .leg-row.multi{grid-template-columns:1fr 34px 1fr 150px}
+  .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+  .time-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .cta{width:auto;padding:13px 34px}
+  .sheet{inset:0 0 0 auto;width:400px;max-height:none;border-radius:0;transform:translateX(101%)}
+  .sheet.on{transform:none}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="head-in">
+    <div class="brand"><b>Franja</b><span>vuelo · tren · bus</span></div>
+    <div class="modes" id="modes" role="group" aria-label="Modos de transporte">
+      <button class="mode-btn" data-mode="air" aria-pressed="true">✈ Avión</button>
+      <button class="mode-btn" data-mode="rail" aria-pressed="true">▤ Tren</button>
+      <button class="mode-btn" data-mode="bus" aria-pressed="true">▭ Bus</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ============ BÚSQUEDA ============ -->
+  <section class="panel pad" id="searchPanel" style="margin-top:14px">
+    <div class="leg-head">
+      <div class="seg" id="tripType" role="group" aria-label="Tipo de viaje">
+        <button data-trip="round" aria-pressed="true">Ida y vuelta</button>
+        <button data-trip="oneway" aria-pressed="false">Solo ida</button>
+        <button data-trip="multi" aria-pressed="false">Multidestino</button>
+      </div>
+    </div>
+
+    <div id="legs"></div>
+    <button class="link-btn" id="addLeg" hidden>+ Añadir trayecto</button>
+
+    <div class="grid-2" style="margin-top:4px">
+      <div class="field">
+        <label class="lbl" for="pax">Pasajeros</label>
+        <input id="pax" type="number" min="1" max="9" value="1">
+      </div>
+      <div class="field">
+        <label class="lbl" for="cabin">Clase</label>
+        <select id="cabin">
+          <option value="economy">Turista</option>
+          <option value="premium">Turista premium</option>
+          <option value="business">Business</option>
+        </select>
+      </div>
+    </div>
+
+    <hr class="sep">
+
+    <!-- ---- bloque horario: el diferenciador ---- -->
+    <div class="time-block">
+      <p class="lbl" style="margin:0 0 8px">Preferencia horaria · solo trayecto de ida</p>
+
+      <div class="exact-row">
+        <div class="field">
+          <label class="lbl" for="exactTime">Hora de salida ideal</label>
+          <input id="exactTime" type="time" step="300">
+        </div>
+        <p class="sub" style="flex:1;margin:0 0 8px">No descarta nada: ordena por cercanía y cada
+          resultado enseña su desfase.</p>
+      </div>
+
+      <div class="time-grid" style="margin-top:12px">
+        <div>
+          <div class="range-head">
+            <label class="switch"><input type="checkbox" id="depOn"> Franja de salida</label>
+            <span class="range-val" id="depVal">06:00 – 12:00</span>
+          </div>
+          <div class="ruler" id="depRuler" data-key="dep">
+            <div class="track"></div><div class="fill"></div>
+            <input type="range" min="0" max="1440" step="15" value="360" aria-label="Salida desde">
+            <input type="range" min="0" max="1440" step="15" value="720" aria-label="Salida hasta">
+          </div>
+        </div>
+        <div>
+          <div class="range-head">
+            <label class="switch"><input type="checkbox" id="arrOn"> Franja de llegada</label>
+            <span class="range-val" id="arrVal">12:00 – 23:45</span>
+          </div>
+          <div class="ruler" id="arrRuler" data-key="arr">
+            <div class="track"></div><div class="fill"></div>
+            <input type="range" min="0" max="1440" step="15" value="720" aria-label="Llegada desde">
+            <input type="range" min="0" max="1440" step="15" value="1425" aria-label="Llegada hasta">
+          </div>
+        </div>
+      </div>
+      <p class="sub" style="margin-top:10px">Las franjas descartan de verdad. No cruzan medianoche:
+        una franja empieza y acaba el mismo día.</p>
+    </div>
+
+    <button class="cta" id="searchBtn">Buscar</button>
+  </section>
+
+  <!-- ============ RESULTADOS ============ -->
+  <section id="results" hidden>
+    <div class="strip" id="strip"></div>
+    <div class="tools" id="tools">
+      <span class="count" id="resCount"></span>
+      <label class="sr" for="sortSel">Ordenar por</label>
+      <select id="sortSel" class="btn" style="padding:7px 10px">
+        <option value="best">Mejor</option>
+        <option value="price">Precio</option>
+        <option value="duration">Duración total</option>
+        <option value="departure">Hora de salida</option>
+        <option value="proximity">Cercanía a mi hora</option>
+      </select>
+      <button class="btn" id="openFilters">Filtros</button>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div id="list"></div>
+  </section>
+
+  <!-- ============ LABORATORIO ============ -->
+  <details class="lab panel">
+    <summary class="pad" style="padding-bottom:0;list-style:none">Laboratorio · probar fallos y modo</summary>
+    <div class="pad">
+      <p style="margin:0 0 8px;color:var(--ink-2);font-size:13px">
+        Simula que un proveedor se cae. La búsqueda del resto tiene que seguir funcionando.</p>
+      <label><input type="checkbox" data-fail="air"> Falla el proveedor de vuelos</label>
+      <label><input type="checkbox" data-fail="rail"> Falla el proveedor de tren</label>
+      <label><input type="checkbox" data-fail="bus"> Falla el proveedor de bus</label>
+      <p id="modeLine" style="margin:10px 0 0;color:var(--muted);font-size:12.5px"></p>
+    </div>
+  </details>
+
+  <footer>
+    Franja es un metabuscador: compara y enlaza a la web del proveedor. No vende billetes ni
+    reserva nada. <span id="co2Foot"></span>
+  </footer>
+</div>
+
+<div class="scrim" id="scrim"></div>
+
+<!-- panel de filtros -->
+<aside class="sheet" id="filterSheet" role="dialog" aria-modal="true" aria-labelledby="fTitle" hidden>
+  <div class="sheet-head">
+    <h2 id="fTitle">Filtros</h2>
+    <button class="btn small" id="clearFilters" style="margin-left:auto">Quitar todos</button>
+    <button class="btn small" id="closeFilters" aria-label="Cerrar">✕</button>
+  </div>
+  <div class="sheet-body" id="filterBody"></div>
+  <div class="sheet-foot">
+    <button class="cta" id="applyFilters">Ver resultados</button>
+  </div>
+</aside>
+
+<!-- detalle -->
+<aside class="sheet" id="detailSheet" role="dialog" aria-modal="true" aria-labelledby="dTitle" hidden>
+  <div class="sheet-head">
+    <h2 id="dTitle">Detalle del viaje</h2>
+    <button class="btn small" id="closeDetail" style="margin-left:auto" aria-label="Cerrar">✕</button>
+  </div>
+  <div class="sheet-body" id="detailBody"></div>
+  <div class="sheet-foot">
+    <a class="cta" id="detailBook" href="#" target="_blank" rel="noopener"
+       style="text-align:center;text-decoration:none;display:block">Reservar</a>
+  </div>
+</aside>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+
+/* =====================================================================================
+   1. CONFIG — lo único que hay que tocar
+   ===================================================================================== */
+const CONFIG = {
+  MODE: 'mock',                 // 'mock' | 'live'  (live = solo vuelos, requiere proxy)
+  PROXY_URL: '',                // p.ej. 'https://franja-proxy.tuusuario.workers.dev'
+  CURRENCY: 'EUR',
+  MARKET: 'es',                 // mercado de la caché de Aviasales (de dónde salen las búsquedas)
+
+  // Margen de acceso puerta a puerta. Editable, no hardcodeado en la lógica.
+  ACCESS_BUFFER_MINUTES: { air: 120, rail: 20, bus: 15 },
+
+  // Cobertura terrestre razonable. Más allá de esto el proveedor devuelve vacío, no inventa.
+  MAX_DISTANCE_KM: { rail: 1600, bus: 1500 },
+
+  // kg CO2 por pasajero-km. null = no hay fuente razonable -> se omite el dato, no se inventa.
+  CO2_FACTORS: { air: 0.154, rail: 0.035, bus: 0.028 },
+  CO2_SOURCE: 'Estimación por pasajero-km con factores medios de referencia europeos (orden ' +
+              'de magnitud). No es el dato real del operador ni tiene en cuenta ocupación, ' +
+              'aeronave concreta ni mix eléctrico del país.',
+
+  BEST: { priceWeight: 0.55, durationWeight: 0.45, stopPenalty: 0.08 },
+  LATENCY_MS: { air: 950, rail: 1600, bus: 550 }
+};
+
+/* =====================================================================================
+   2. CATÁLOGO DE CIUDADES
+   ---------------------------------------------------------------------------------
+   Formato: nombre;IATA;lat;lon;país;alias (opcional, separados por coma)
+   Coordenadas redondeadas a dos decimales: sobra para estimar distancias, y ninguna
+   duración de este catálogo pretende ser exacta. Los códigos IATA son los reales del
+   aeropuerto principal de cada ciudad; los de estación de tren y bus se derivan del
+   IATA salvo en las ciudades grandes, que llevan su nombre real (ver ESTACIONES).
+   ===================================================================================== */
+const CITY_DATA = `
+Madrid;MAD;40.42;-3.70;ES
+Barcelona;BCN;41.39;2.17;ES
+Valencia;VLC;39.47;-0.38;ES;València
+Sevilla;SVQ;37.39;-5.98;ES
+Málaga;AGP;36.72;-4.42;ES;Malaga
+Bilbao;BIO;43.26;-2.93;ES
+Alicante;ALC;38.35;-0.48;ES
+Zaragoza;ZAZ;41.65;-0.89;ES
+Granada;GRX;37.18;-3.60;ES
+Murcia;RMU;37.99;-1.13;ES
+Almería;LEI;36.84;-2.46;ES;Almeria
+Santander;SDR;43.46;-3.81;ES
+Asturias;OVD;43.36;-5.85;ES;Oviedo,Gijón
+Santiago de Compostela;SCQ;42.88;-8.54;ES;Santiago
+Vigo;VGO;42.24;-8.72;ES
+A Coruña;LCG;43.37;-8.40;ES;Coruña,La Coruña
+Pamplona;PNA;42.81;-1.65;ES
+San Sebastián;EAS;43.32;-1.98;ES;Donostia,San Sebastian
+Valladolid;VLL;41.65;-4.72;ES
+Girona;GRO;41.98;2.82;ES;Gerona
+Jerez;XRY;36.69;-6.14;ES;Jerez de la Frontera
+Palma de Mallorca;PMI;39.57;2.65;ES;Palma,Mallorca
+Ibiza;IBZ;38.91;1.43;ES;Eivissa
+Menorca;MAH;39.89;4.26;ES;Mahón
+Tenerife;TFN;28.47;-16.25;ES;Santa Cruz de Tenerife
+Las Palmas;LPA;28.10;-15.41;ES;Gran Canaria
+Lanzarote;ACE;28.96;-13.55;ES;Arrecife
+Fuerteventura;FUE;28.45;-13.86;ES;Puerto del Rosario
+La Palma;SPC;28.68;-17.76;ES
+Lisboa;LIS;38.72;-9.14;PT;Lisbon
+Porto;OPO;41.16;-8.63;PT;Oporto
+Faro;FAO;37.02;-7.93;PT
+Funchal;FNC;32.65;-16.91;PT;Madeira
+Ponta Delgada;PDL;37.74;-25.67;PT;Azores,Açores
+París;CDG;48.86;2.35;FR;Paris
+Lyon;LYS;45.76;4.84;FR;Lion
+Marsella;MRS;43.30;5.37;FR;Marseille
+Toulouse;TLS;43.60;1.44;FR;Tolosa
+Niza;NCE;43.70;7.27;FR;Nice
+Nantes;NTE;47.22;-1.55;FR
+Burdeos;BOD;44.84;-0.58;FR;Bordeaux
+Estrasburgo;SXB;48.57;7.75;FR;Strasbourg
+Lille;LIL;50.63;3.06;FR
+Montpellier;MPL;43.61;3.88;FR
+Rennes;RNS;48.11;-1.68;FR
+Brest;BES;48.39;-4.49;FR
+Biarritz;BIQ;43.48;-1.56;FR
+Clermont-Ferrand;CFE;45.78;3.08;FR
+Ajaccio;AJA;41.93;8.74;FR;Córcega,Corse
+Roma;FCO;41.90;12.50;IT;Rome
+Milán;MXP;45.46;9.19;IT;Milan,Milano
+Nápoles;NAP;40.85;14.27;IT;Napoli,Naples
+Venecia;VCE;45.44;12.32;IT;Venezia,Venice
+Bolonia;BLQ;44.49;11.34;IT;Bologna
+Florencia;FLR;43.77;11.26;IT;Firenze,Florence
+Turín;TRN;45.07;7.69;IT;Torino,Turin
+Pisa;PSA;43.72;10.40;IT
+Verona;VRN;45.44;10.99;IT
+Génova;GOA;44.41;8.93;IT;Genova,Genoa
+Trieste;TRS;45.65;13.78;IT
+Bari;BRI;41.12;16.87;IT
+Brindisi;BDS;40.64;17.94;IT
+Palermo;PMO;38.12;13.36;IT;Sicilia
+Catania;CTA;37.50;15.09;IT
+Cagliari;CAG;39.22;9.12;IT;Cerdeña,Sardegna
+Olbia;OLB;40.92;9.50;IT
+Berlín;BER;52.52;13.41;DE;Berlin
+Múnich;MUC;48.14;11.58;DE;Munich,München
+Fráncfort;FRA;50.11;8.68;DE;Frankfurt
+Hamburgo;HAM;53.55;9.99;DE;Hamburg
+Düsseldorf;DUS;51.23;6.78;DE;Dusseldorf
+Colonia;CGN;50.94;6.96;DE;Köln,Cologne
+Stuttgart;STR;48.78;9.18;DE
+Núremberg;NUE;49.45;11.08;DE;Nuremberg,Nürnberg
+Hannover;HAJ;52.37;9.74;DE;Hanóver
+Leipzig;LEJ;51.34;12.37;DE
+Dresde;DRS;51.05;13.74;DE;Dresden
+Bremen;BRE;53.08;8.81;DE
+Dortmund;DTM;51.51;7.47;DE
+Londres;LHR;51.51;-0.13;GB;London
+Mánchester;MAN;53.48;-2.24;GB;Manchester
+Birmingham;BHX;52.49;-1.89;GB
+Edimburgo;EDI;55.95;-3.19;GB;Edinburgh
+Glasgow;GLA;55.86;-4.25;GB
+Bristol;BRS;51.45;-2.59;GB
+Liverpool;LPL;53.41;-2.98;GB
+Newcastle;NCL;54.98;-1.61;GB
+Leeds;LBA;53.80;-1.55;GB
+Cardiff;CWL;51.48;-3.18;GB
+Aberdeen;ABZ;57.15;-2.09;GB
+Southampton;SOU;50.91;-1.40;GB
+Belfast;BFS;54.60;-5.93;GB
+Dublín;DUB;53.35;-6.26;IE;Dublin
+Cork;ORK;51.90;-8.47;IE
+Shannon;SNN;52.70;-8.92;IE;Limerick
+Ámsterdam;AMS;52.37;4.90;NL;Amsterdam
+Róterdam;RTM;51.92;4.48;NL;Rotterdam
+Eindhoven;EIN;51.44;5.48;NL
+Groninga;GRQ;53.22;6.57;NL;Groningen
+Bruselas;BRU;50.85;4.35;BE;Brussels,Bruxelles
+Amberes;ANR;51.22;4.40;BE;Antwerpen,Antwerp
+Charleroi;CRL;50.41;4.44;BE
+Lieja;LGG;50.63;5.57;BE;Liège
+Luxemburgo;LUX;49.61;6.13;LU;Luxembourg
+Zúrich;ZRH;47.38;8.54;CH;Zurich,Zürich
+Ginebra;GVA;46.20;6.14;CH;Geneva,Genève
+Basilea;BSL;47.56;7.59;CH;Basel
+Berna;BRN;46.95;7.45;CH;Bern
+Viena;VIE;48.21;16.37;AT;Vienna,Wien
+Salzburgo;SZG;47.81;13.05;AT;Salzburg
+Innsbruck;INN;47.27;11.39;AT
+Graz;GRZ;47.07;15.44;AT
+Praga;PRG;50.08;14.44;CZ;Prague,Praha
+Brno;BRQ;49.20;16.61;CZ
+Varsovia;WAW;52.23;21.01;PL;Warsaw,Warszawa
+Cracovia;KRK;50.06;19.94;PL;Krakow,Kraków
+Gdansk;GDN;54.35;18.65;PL;Gdańsk
+Breslavia;WRO;51.11;17.04;PL;Wroclaw
+Poznan;POZ;52.41;16.93;PL;Poznań
+Katowice;KTW;50.26;19.02;PL
+Budapest;BUD;47.50;19.04;HU
+Bratislava;BTS;48.15;17.11;SK
+Liubliana;LJU;46.06;14.51;SI;Ljubljana
+Zagreb;ZAG;45.81;15.98;HR
+Split;SPU;43.51;16.44;HR
+Dubrovnik;DBV;42.65;18.09;HR
+Zadar;ZAD;44.12;15.23;HR
+Belgrado;BEG;44.79;20.45;RS;Belgrade,Beograd
+Sarajevo;SJJ;43.86;18.41;BA
+Podgorica;TGD;42.44;19.26;ME
+Tirana;TIA;41.33;19.82;AL
+Skopie;SKP;41.99;21.43;MK;Skopje
+Sofía;SOF;42.70;23.32;BG;Sofia
+Varna;VAR;43.20;27.91;BG
+Burgas;BOJ;42.51;27.47;BG
+Bucarest;OTP;44.43;26.10;RO;Bucharest,Bucuresti
+Cluj;CLJ;46.77;23.60;RO;Cluj-Napoca
+Timisoara;TSR;45.75;21.23;RO;Timișoara
+Iasi;IAS;47.16;27.59;RO;Iași
+Atenas;ATH;37.98;23.73;GR;Athens,Athina
+Salónica;SKG;40.64;22.94;GR;Tesalónica,Thessaloniki
+Heraclión;HER;35.34;25.14;GR;Creta,Heraklion
+Rodas;RHO;36.44;28.23;GR;Rhodes
+Corfú;CFU;39.62;19.92;GR;Corfu,Kerkyra
+Santorini;JTR;36.39;25.46;GR;Thira
+Mikonos;JMK;37.45;25.33;GR;Mykonos
+Estambul;IST;41.01;28.98;TR;Istanbul
+Ankara;ESB;39.93;32.86;TR
+Esmirna;ADB;38.42;27.14;TR;Izmir
+Antalya;AYT;36.90;30.69;TR
+Lárnaca;LCA;34.92;33.62;CY;Larnaca,Chipre
+Pafos;PFO;34.78;32.42;CY;Paphos
+Malta;MLA;35.90;14.51;MT;La Valeta,Valletta
+Copenhague;CPH;55.68;12.57;DK;Copenhagen,København
+Aarhus;AAR;56.16;10.20;DK
+Aalborg;AAL;57.05;9.92;DK
+Billund;BLL;55.73;9.11;DK
+Estocolmo;ARN;59.33;18.07;SE;Stockholm
+Gotemburgo;GOT;57.71;11.97;SE;Goteborg,Göteborg
+Malmö;MMX;55.60;13.00;SE;Malmo
+Oslo;OSL;59.91;10.75;NO
+Bergen;BGO;60.39;5.32;NO
+Trondheim;TRD;63.43;10.39;NO
+Stavanger;SVG;58.97;5.73;NO
+Tromsø;TOS;69.65;18.96;NO;Tromso
+Helsinki;HEL;60.17;24.94;FI
+Tampere;TMP;61.50;23.79;FI
+Turku;TKU;60.45;22.27;FI
+Rovaniemi;RVN;66.50;25.73;FI;Laponia
+Reikiavik;KEF;64.15;-21.94;IS;Reykjavik,Islandia
+Tallin;TLL;59.44;24.75;EE;Tallinn
+Riga;RIX;56.95;24.11;LV
+Vilna;VNO;54.69;25.28;LT;Vilnius
+Kaunas;KUN;54.90;23.90;LT
+`.trim().split('\n');
+
+/* Husos: hora estándar del país y si aplica horario de verano europeo.
+   Turquía e Islandia no cambian la hora. Canarias, Madeira y Azores no siguen el huso
+   de su país, así que van como excepción por ciudad. */
+const COUNTRY = {
+  ES:{o:60,dst:1}, PT:{o:0,dst:1}, FR:{o:60,dst:1}, IT:{o:60,dst:1}, DE:{o:60,dst:1},
+  GB:{o:0,dst:1},  IE:{o:0,dst:1}, NL:{o:60,dst:1}, BE:{o:60,dst:1}, LU:{o:60,dst:1},
+  CH:{o:60,dst:1}, AT:{o:60,dst:1},CZ:{o:60,dst:1}, PL:{o:60,dst:1}, HU:{o:60,dst:1},
+  SK:{o:60,dst:1}, SI:{o:60,dst:1},HR:{o:60,dst:1}, RS:{o:60,dst:1}, BA:{o:60,dst:1},
+  ME:{o:60,dst:1}, AL:{o:60,dst:1},MK:{o:60,dst:1}, MT:{o:60,dst:1}, DK:{o:60,dst:1},
+  SE:{o:60,dst:1}, NO:{o:60,dst:1},GR:{o:120,dst:1},BG:{o:120,dst:1},RO:{o:120,dst:1},
+  FI:{o:120,dst:1},EE:{o:120,dst:1},LV:{o:120,dst:1},LT:{o:120,dst:1},CY:{o:120,dst:1},
+  TR:{o:180,dst:0},IS:{o:0,dst:0}
+};
+const TZ_OVERRIDE = {                       // ciudades que no siguen el huso de su país
+  'Tenerife':{o:0,dst:1}, 'Las Palmas':{o:0,dst:1}, 'Lanzarote':{o:0,dst:1},
+  'Fuerteventura':{o:0,dst:1}, 'La Palma':{o:0,dst:1},
+  'Funchal':{o:0,dst:1}, 'Ponta Delgada':{o:-60,dst:1}
+};
+
+/* Masas de tierra. Tren y bus solo conectan ciudades del mismo grupo: no hay vía férrea
+   a Ibiza por mucho que la distancia sea corta. Londres va en 'eu' por el Eurotúnel;
+   Sicilia también, porque los trenes cruzan en ferry. */
+const LAND = {
+  'Palma de Mallorca':'bal','Ibiza':'bal','Menorca':'bal',
+  'Tenerife':'tf','Las Palmas':'gc','Lanzarote':'lz','Fuerteventura':'fv','La Palma':'lp',
+  'Funchal':'md','Ponta Delgada':'az','Ajaccio':'co','Cagliari':'sd','Olbia':'sd',
+  'Dublín':'ie','Cork':'ie','Shannon':'ie','Belfast':'ie',
+  'Reikiavik':'is','Malta':'mt','Lárnaca':'cy','Pafos':'cy',
+  'Heraclión':'cr','Rodas':'rh','Corfú':'cf','Santorini':'st','Mikonos':'mk'
+};
+
+/* Nombres reales de estación en las ciudades grandes. El resto se generan a partir del
+   patrón del país: son inventados, y el modo mock ya avisa de que los datos lo son. */
+const ESTACIONES = {
+  'Madrid':    { rail:['MADAT','Madrid-Puerta de Atocha'], bus:['MADSU','Madrid Estación Sur'] },
+  'Barcelona': { rail:['BCNSA','Barcelona Sants'],         bus:['BCNNO','Barcelona Nord'] },
+  'Valencia':  { rail:['VLCJS','València Joaquín Sorolla'],bus:['VLCEA','València Estació d\'Autobusos'] },
+  'Sevilla':   { rail:['SVQSJ','Sevilla Santa Justa'],     bus:['SVQPA','Sevilla Plaza de Armas'] },
+  'Bilbao':    { rail:['BIOAB','Bilbao-Abando'],           bus:['BIOTB','Bilbao Termibus'] },
+  'Málaga':    { rail:['AGPMZ','Málaga María Zambrano'],   bus:['AGPMH','Málaga Muelle Heredia'] },
+  'Zaragoza':  { rail:['ZAZDE','Zaragoza-Delicias'],       bus:['ZAZDE','Zaragoza-Delicias'] },
+  'Lisboa':    { rail:['LISOR','Lisboa Oriente'],          bus:['LISSR','Lisboa Sete Rios'] },
+  'Porto':     { rail:['OPOCA','Porto Campanhã'],          bus:['OPOCM','Porto Casa da Música'] },
+  'París':     { rail:['PARLY','Paris Gare de Lyon'],      bus:['PARBE','Paris Bercy Seine'] },
+  'Lyon':      { rail:['LYSPD','Lyon Part-Dieu'],          bus:['LYSPE','Lyon Perrache'] },
+  'Toulouse':  { rail:['TLSMA','Toulouse Matabiau'],       bus:['TLSGR','Toulouse Gare Routière'] },
+  'Londres':   { rail:['LONSP','London St Pancras'],       bus:['LONVI','London Victoria Coach'] },
+  'Ámsterdam': { rail:['AMSCS','Amsterdam Centraal'],      bus:['AMSSL','Amsterdam Sloterdijk'] },
+  'Berlín':    { rail:['BERHB','Berlin Hauptbahnhof'],     bus:['BERZO','Berlin ZOB'] },
+  'Múnich':    { rail:['MUCHB','München Hauptbahnhof'],    bus:['MUCZO','München ZOB'] },
+  'Milán':     { rail:['MILCE','Milano Centrale'],         bus:['MILLA','Milano Lampugnano'] },
+  'Roma':      { rail:['ROMTE','Roma Termini'],            bus:['ROMTI','Roma Tiburtina'] },
+  'Bruselas':  { rail:['BRUMI','Bruxelles-Midi'],          bus:['BRUNO','Bruxelles-Nord'] },
+  'Viena':     { rail:['VIEHB','Wien Hauptbahnhof'],       bus:['VIEER','Wien Erdberg'] },
+  'Praga':     { rail:['PRGHN','Praha hlavní nádraží'],    bus:['PRGFL','Praha Florenc'] },
+  'Zúrich':    { rail:['ZRHHB','Zürich Hauptbahnhof'],     bus:['ZRHSB','Zürich Sihlquai'] }
+};
+const PATRON = {
+  ES:{r:c=>`Estación de ${c}`,        b:c=>`Estación de autobuses de ${c}`},
+  PT:{r:c=>`Estação de ${c}`,         b:c=>`Terminal rodoviário de ${c}`},
+  FR:{r:c=>`Gare de ${c}`,            b:c=>`Gare routière de ${c}`},
+  BE:{r:c=>`Gare de ${c}`,            b:c=>`Gare routière de ${c}`},
+  LU:{r:c=>`Gare de ${c}`,            b:c=>`Gare routière de ${c}`},
+  IT:{r:c=>`${c} Centrale`,           b:c=>`Autostazione di ${c}`},
+  DE:{r:c=>`${c} Hauptbahnhof`,       b:c=>`${c} ZOB`},
+  AT:{r:c=>`${c} Hauptbahnhof`,       b:c=>`${c} Busterminal`},
+  CH:{r:c=>`${c} Hauptbahnhof`,       b:c=>`${c} Busterminal`},
+  NL:{r:c=>`${c} Centraal`,           b:c=>`${c} Busstation`},
+  GB:{r:c=>`${c} Central`,            b:c=>`${c} Coach Station`},
+  IE:{r:c=>`${c} Station`,            b:c=>`${c} Bus Station`},
+  PL:{r:c=>`${c} Główny`,             b:c=>`${c} Dworzec autobusowy`},
+  DK:{r:c=>`${c} H`,                  b:c=>`${c} Busterminal`},
+  SE:{r:c=>`${c} C`,                  b:c=>`${c} Busstation`},
+  NO:{r:c=>`${c} S`,                  b:c=>`${c} Bussterminal`},
+  FI:{r:c=>`${c} rautatieasema`,      b:c=>`${c} linja-autoasema`}
+};
+const PATRON_DEF = { r:c=>`${c} Central`, b:c=>`${c} Bus Terminal` };
+
+const CITIES = {};
+CITY_DATA.forEach(line => {
+  const [name, iata, lat, lon, cc, alias] = line.split(';');
+  const tz = TZ_OVERRIDE[name] || COUNTRY[cc] || { o:60, dst:1 };
+  const p = PATRON[cc] || PATRON_DEF;
+  const est = ESTACIONES[name] || {};
+  CITIES[name] = {
+    lat:+lat, lon:+lon, cc, iata,
+    tzo: tz.o, tzdst: !!tz.dst,
+    land: LAND[name] || 'eu',
+    alias: alias ? alias.split(',') : [],
+    air:  [iata, `Aeropuerto de ${name}`],
+    rail: est.rail || [iata + 'R', p.r(name)],
+    bus:  est.bus  || [iata + 'B', p.b(name)]
+  };
+});
+const CITY_NAMES = Object.keys(CITIES);
+const BY_IATA = {};
+CITY_NAMES.forEach(n => { BY_IATA[CITIES[n].iata] = n; });
+
+/* --- Horario de verano europeo: del último domingo de marzo al último de octubre,
+   ambos a las 01:00 UTC. Se aplica al instante concreto, no a la ciudad en abstracto,
+   porque un vuelo de octubre y uno de enero no comparten offset. --- */
+function ultimoDomingoUtc(year, month){
+  const d = new Date(Date.UTC(year, month + 1, 0));
+  d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 1);
+}
+function veranoEu(ms){
+  const y = new Date(ms).getUTCFullYear();
+  return ms >= ultimoDomingoUtc(y, 2) && ms < ultimoDomingoUtc(y, 9);
+}
+function offsetDe(cityName, whenMs){
+  const c = CITIES[cityName];
+  if (!c) return 0;
+  return c.tzo + (c.tzdst && veranoEu(whenMs) ? 60 : 0);
+}
+function offsetDeIata(iata, whenMs){
+  const n = BY_IATA[iata];
+  return n ? offsetDe(n, whenMs) : null;      // null = no lo sabemos, y se dice
+}
+
+/* --- Búsqueda de ciudad tolerante: sin acentos, sin mayúsculas, con alias --- */
+const sinTildes = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+const INDICE = CITY_NAMES.map(n => ({
+  name: n,
+  keys: [n, ...CITIES[n].alias, CITIES[n].iata].map(sinTildes)
+}));
+function resolverCiudad(texto){
+  const q = sinTildes(texto || '');
+  if (!q) return null;
+  if (CITIES[texto]) return texto;
+  const exacta = INDICE.find(e => e.keys.includes(q));
+  return exacta ? exacta.name : null;
+}
+function buscarCiudades(texto, max = 8){
+  const q = sinTildes(texto || '');
+  if (!q) return CITY_NAMES.slice(0, max);
+  const empieza = [], contiene = [];
+  for (const e of INDICE){
+    if (e.keys.some(k => k.startsWith(q))) empieza.push(e.name);
+    else if (e.keys.some(k => k.includes(q))) contiene.push(e.name);
+    if (empieza.length >= max) break;
+  }
+  return empieza.concat(contiene).slice(0, max);
+}
+
+/* Operadores por país. Con dieciocho ciudades daba igual quién volara; con casi
+   doscientas, ver a Renfe cubriendo Berlín-Praga rompe la ilusión al instante. Cada
+   trayecto elige entre los operadores de su país de origen, los del de destino y los
+   paneuropeos. Sigue siendo inventado, pero deja de ser absurdo. */
+const OPERADORES = {
+  air: {
+    ES:[['Iberia','IB'],['Vueling','VY'],['Air Europa','UX'],['Iberia Express','I2']],
+    PT:[['TAP Air Portugal','TP']], FR:[['Air France','AF'],['Transavia France','TO']],
+    IT:[['ITA Airways','AZ']], DE:[['Lufthansa','LH'],['Eurowings','EW']],
+    GB:[['British Airways','BA'],['Jet2','LS']], IE:[['Aer Lingus','EI']],
+    NL:[['KLM','KL'],['Transavia','HV']], BE:[['Brussels Airlines','SN']],
+    CH:[['SWISS','LX']], AT:[['Austrian','OS']], PL:[['LOT','LO']],
+    CZ:[['Smartwings','QS']], GR:[['Aegean','A3']],
+    TR:[['Turkish Airlines','TK'],['Pegasus','PC']], RO:[['Tarom','RO']],
+    RS:[['Air Serbia','JU']], HR:[['Croatia Airlines','OU']], MT:[['KM Malta Airlines','KM']],
+    DK:[['SAS','SK']], SE:[['SAS','SK']], NO:[['Norwegian','DY'],['SAS','SK']],
+    FI:[['Finnair','AY']], IS:[['Icelandair','FI']],
+    LV:[['airBaltic','BT']], EE:[['airBaltic','BT']], LT:[['airBaltic','BT']]
+  },
+  rail: {
+    ES:[['Renfe','AVE'],['Ouigo','OUI'],['Iryo','IRY']], PT:[['CP','IC']],
+    FR:[['SNCF','TGV'],['Ouigo','OUI']], IT:[['Trenitalia','FR'],['Italo','ITA']],
+    DE:[['Deutsche Bahn','ICE']], GB:[['LNER','LNR'],['Avanti West Coast','AWC']],
+    IE:[['Iarnród Éireann','IE']], NL:[['NS','NS']], BE:[['SNCB','IC']],
+    LU:[['CFL','RE']], CH:[['SBB','IC']], AT:[['ÖBB','RJ']], PL:[['PKP Intercity','IC']],
+    CZ:[['České dráhy','CD']], HU:[['MÁV','IC']], SK:[['ZSSK','IC']],
+    SI:[['Slovenske železnice','SZ']], HR:[['HŽ','HZ']], RS:[['Srbija Voz','SV']],
+    GR:[['Hellenic Train','HT']], BG:[['BDŽ','BDZ']], RO:[['CFR','IR']],
+    TR:[['TCDD','YHT']], DK:[['DSB','IC']], SE:[['SJ','SJ']], NO:[['Vy','VY']],
+    FI:[['VR','IC']], EE:[['Elron','EL']], LT:[['LTG Link','LTG']], LV:[['Vivi','VIV']]
+  },
+  bus: {
+    ES:[['ALSA','ALS'],['Avanza','AVZ'],['Monbus','MON']], PT:[['Rede Expressos','RDE']],
+    IT:[['Itabus','ITB'],['MarinoBus','MAR']], GB:[['National Express','NX'],['Megabus','MGB']],
+    IE:[['Bus Éireann','BE']], PL:[['PolskiBus','PLB']], TR:[['Metro Turizm','MTZ']],
+    GR:[['KTEL','KTL']], RO:[['Autogari','AGR']]
+  }
+};
+const PANEUROPEOS = {
+  air:  [['Ryanair','FR'],['easyJet','U2'],['Wizz Air','W6']],
+  rail: [['Eurostar','EST']],
+  bus:  [['FlixBus','FLX'],['BlaBlaCar Bus','BBC']]
+};
+// Material rodante coherente con el operador. Lo que no está aquí va como Intercity.
+const MATERIAL = {
+  'Renfe':['AVE S-103','Alvia S-130'], 'Ouigo':['Ouigo Duplex'], 'Iryo':['Iryo ETR 1000'],
+  'SNCF':['TGV inOui'], 'Trenitalia':['Frecciarossa 1000'], 'Italo':['Italo AGV'],
+  'Deutsche Bahn':['ICE 3','ICE 4'], 'ÖBB':['Railjet'], 'SBB':['InterCity 2000'],
+  'NS':['Intercity Direct'], 'Eurostar':['Eurostar e320'], 'PKP Intercity':['Pendolino ED250'],
+  'České dráhy':['Railjet'], 'SJ':['SJ X2000'], 'DSB':['IC4'], 'VR':['Pendolino Sm3'],
+  'CP':['Alfa Pendular'], 'LNER':['Azuma'], 'Avanti West Coast':['Pendolino'],
+  'TCDD':['YHT HT80000'], 'Vy':['Vy tipo 73']
+};
+const MATERIAL_DEF = ['Intercity'];
+const VEHICLES = {
+  air: ['Airbus A320neo','Boeing 737-800','Airbus A321','Embraer 195','Airbus A220-300'],
+  bus: ['Autocar Setra 517','Autocar Irizar i8','Autocar Van Hool TX','Autocar Mercedes Tourismo']
+};
+
+function operadores(mode, fromCity, toCity){
+  const t = OPERADORES[mode] || {};
+  const a = t[CITIES[fromCity].cc] || [], b = t[CITIES[toCity].cc] || [];
+  const pool = [...a, ...b.filter(x => !a.some(y => y[1] === x[1]))];
+  // Los paneuropeos solo aparecen cruzando frontera: Ryanair no cubre Roma-Nápoles ni
+  // FlixBus la mitad de las rutas nacionales. Si el país no tiene operadores propios en
+  // la tabla, entran igualmente para que la ruta no se quede sin nadie.
+  const internacional = CITIES[fromCity].cc !== CITIES[toCity].cc;
+  const extra = mode === 'rail'
+    ? (internacional && ['GB','FR','BE','NL'].includes(CITIES[fromCity].cc)
+                     && ['GB','FR','BE','NL'].includes(CITIES[toCity].cc) ? PANEUROPEOS.rail : [])
+    : (internacional || !pool.length ? PANEUROPEOS[mode] : []);
+  const todos = [...pool, ...extra];
+  return todos.length ? todos : [['Operador local', mode.toUpperCase().slice(0,2)]];
+}
+const materialDe = (mode, carrier) =>
+  mode === 'rail' ? (MATERIAL[carrier] || MATERIAL_DEF) : VEHICLES[mode];
+
+const MODE_LABEL = { air:'Avión', rail:'Tren', bus:'Bus' };
+const LOWCOST = new Set(['Ryanair','easyJet','Wizz Air','Vueling','Transavia',
+  'Transavia France','Eurowings','Jet2','Norwegian','Pegasus','Smartwings','Iberia Express',
+  'Ouigo','Italo','FlixBus','BlaBlaCar Bus','Megabus','Itabus']);
+
+/* =====================================================================================
+   3. UTILIDADES
+   ===================================================================================== */
+const $  = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+const pad = n => String(n).padStart(2,'0');
+const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
+
+function hash(str){ let h=2166136261; for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619);} return h>>>0; }
+function rngFrom(seed){ let a=hash(seed); return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+const pick = (rng,arr) => arr[Math.floor(rng()*arr.length)];
+
+function haversine(a,b){
+  const R=6371, r=d=>d*Math.PI/180;
+  const dLat=r(b.lat-a.lat), dLon=r(b.lon-a.lon);
+  const s=Math.sin(dLat/2)**2 + Math.cos(r(a.lat))*Math.cos(r(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+
+/* --- Tiempo. Regla de la casa: se compara en UTC, se pinta en hora local. ------------
+   Un ISO con offset ("2026-08-12T08:30:00+02:00") lleva las dos cosas dentro:
+   Date.parse() da el instante UTC, y los caracteres 11..16 dan la hora local ya resuelta.
+   Por eso los filtros horarios leen la cadena y no aplican ninguna conversión extra. */
+function isoAt(utcMs, offMin){
+  const d = new Date(utcMs + offMin*60000);
+  const s = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}T` +
+            `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`;
+  const sign = offMin < 0 ? '-' : '+', a = Math.abs(offMin);
+  return `${s}${sign}${pad(Math.floor(a/60))}:${pad(a%60)}`;
+}
+const utcOf      = iso => Date.parse(iso);
+const localMin   = iso => (+iso.slice(11,13))*60 + (+iso.slice(14,16));   // minuto local del día
+const localDay   = iso => iso.slice(0,10);
+const fmtTime    = iso => iso.slice(11,16);
+function fmtMin(m){ const h=Math.floor(m/60), r=Math.round(m%60); return h ? `${h}h ${pad(r)}` : `${r} min`; }
+function hhmm(m){ m=clamp(Math.round(m),0,1440); return m>=1440 ? '24:00' : `${pad(Math.floor(m/60))}:${pad(m%60)}`; }
+const fmtEur = v => new Intl.NumberFormat('es-ES',{style:'currency',currency:CONFIG.CURRENCY,maximumFractionDigits:0}).format(v);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* =====================================================================================
+   4. MODELO — Offer / Segment
+   ---------------------------------------------------------------------------------
+   Offer   { id, mode, price, currency, segments[], duration_total_minutes,
+             stops_count, co2_kg|null, booking_url, provider_name }
+   Segment { origin, destination, departure_time, arrival_time, carrier, vehicle_type, leg }
+
+   Extensión sobre la spec: Segment.leg (0 = ida, 1 = vuelta, 2+ = multidestino). La spec
+   define segments como lista plana y no cubría ida y vuelta; esto es lo mínimo que hace
+   falta para no romper el modelo. stops_count = transbordos del trayecto con más
+   transbordos, para que "directo" signifique directo en todos los trayectos.
+   Ningún componente de UI toca la respuesta cruda de un proveedor: solo Offer.
+   ===================================================================================== */
+
+/* =====================================================================================
+   5. PROVEEDORES — misma interfaz: search(params) -> Promise<Offer[]>
+   ===================================================================================== */
+function terminal(cityName, mode, whenMs){
+  const c = CITIES[cityName];
+  return { code:c[mode][0], name:c[mode][1], city:cityName,
+           off: offsetDe(cityName, whenMs), lat:c.lat, lon:c.lon };
+}
+
+function buildLeg(rng, mode, fromCity, toCity, dateStr, depLocalMinute){
+  // El offset se resuelve al mediodía UTC de la fecha del trayecto. El cambio de hora
+  // ocurre a las 01:00 UTC, así que solo un viaje que arranque en esa hora exacta podría
+  // quedar desplazado 60 min. Asumido: no vale la pena iterar por ese caso.
+  const [yy, mm, dd] = dateStr.split('-').map(Number);
+  const refMs = Date.UTC(yy, mm-1, dd, 12);
+  const A = terminal(fromCity, mode, refMs), B = terminal(toCity, mode, refMs);
+  const dist = haversine(A,B);
+  const speed = { air:760, rail:172, bus:71 }[mode];
+  const fixed = { air:45, rail:6, bus:12 }[mode];
+  const direct = Math.round(dist/speed*60 + fixed);
+
+  let stops = 0;
+  const pStop = { air:0.42, rail:0.34, bus:0.3 }[mode];
+  if (rng() < pStop) stops = 1;
+  if (mode === 'air' && dist > 1800 && rng() < 0.3) stops = 2;
+  if (mode !== 'air' && dist > 900) stops = 1;
+
+  // Hubs intermedios plausibles: ciudades del catálogo distintas a origen y destino.
+  const grupo = CITIES[fromCity].land;
+  const pool = CITY_NAMES.filter(n => n !== fromCity && n !== toCity &&
+    (mode === 'air' || CITIES[n].land === grupo));
+  // De cuatro candidatos al azar se queda el de menor desvío: una escala Madrid-Oporto-Barcelona
+  // es técnicamente posible pero nadie la vende.
+  const via = [];
+  for (let i=0;i<stops;i++){
+    let best = null, bestCost = Infinity;
+    for (let k=0;k<10;k++){
+      const v = pick(rng, pool);
+      if (via.includes(v)) continue;
+      const cost = haversine(CITIES[fromCity], CITIES[v]) + haversine(CITIES[v], CITIES[toCity]);
+      if (cost < bestCost){ bestCost = cost; best = v; }
+    }
+    if (best) via.push(best);
+  }
+  stops = via.length;
+
+  const [carrier, code] = pick(rng, operadores(mode, fromCity, toCity));
+  const chain = [fromCity, ...via, toCity];
+  const totalTravel = Math.round(direct * (1 + stops*0.18));
+  const perSeg = Math.round(totalTravel / (chain.length - 1));
+
+  let cursorUtc = Date.UTC(yy, mm-1, dd) + depLocalMinute*60000 - A.off*60000;
+
+  const segments = [];
+  for (let i=0;i<chain.length-1;i++){
+    const o = terminal(chain[i], mode, refMs), dst = terminal(chain[i+1], mode, refMs);
+    const dur = Math.max(25, Math.round(perSeg * (0.85 + rng()*0.3)));
+    const dep = cursorUtc, arr = dep + dur*60000;
+    segments.push({
+      origin:o, destination:dst,
+      departure_time: isoAt(dep, o.off),
+      arrival_time:   isoAt(arr, dst.off),
+      carrier, carrier_code: code + (100 + Math.floor(rng()*899)),
+      vehicle_type: pick(rng, materialDe(mode, carrier))
+    });
+    const layover = { air:55, rail:22, bus:25 }[mode] + Math.round(rng()*60);
+    cursorUtc = arr + layover*60000;
+  }
+  return { segments, dist, stops, carrier };
+}
+
+function makeOffers(params, mode){
+  const seed = [mode, params.cabin, params.legs.map(l=>l.from+l.to+l.date).join('|')].join('~');
+  const rng = rngFrom(seed);
+  const dists = params.legs.map(L => haversine(CITIES[L.from], CITIES[L.to]));
+
+  // Cobertura. El proveedor devuelve vacío en vez de inventarse una ruta imposible:
+  //  · tren y bus necesitan tierra continua (no hay vía férrea a Ibiza)
+  //  · y una distancia que alguien opere de verdad
+  //  · el avión no cubre trayectos demasiado cortos: nadie vuela Madrid-Toledo
+  if (mode !== 'air'){
+    if (params.legs.some(L => CITIES[L.from].land !== CITIES[L.to].land)) return [];
+    if (dists.some(d => d > CONFIG.MAX_DISTANCE_KM[mode])) return [];
+  }
+  if (mode === 'air' && dists.some(d => d < 180)) return [];
+
+  const n = { air: 9 + Math.floor(rng()*6), rail: 6 + Math.floor(rng()*4), bus: 4 + Math.floor(rng()*4) }[mode];
+  const cabinMult = { economy:1, premium:1.65, business:2.9 }[params.cabin];
+  const offers = [];
+
+  for (let i=0;i<n;i++){
+    const depMinute = Math.round((300 + rng()*1020) / 5) * 5;   // 05:00 – 22:00
+    const legs = [];
+    let ok = true;
+    params.legs.forEach((L, idx) => {
+      if (!ok) return;
+      const dep = idx === 0 ? depMinute : Math.round((330 + rng()*960)/5)*5;
+      const built = buildLeg(rng, mode, L.from, L.to, L.date, dep);
+      if (!built.segments.length) ok = false;
+      legs.push(built);
+    });
+    if (!ok) continue;
+
+    const segments = [];
+    legs.forEach((lg, li) => lg.segments.forEach(s => segments.push({ ...s, leg: li })));
+
+    // Duración puerta a puerta: viaje real + margen de acceso por modo y por trayecto.
+    const buffer = CONFIG.ACCESS_BUFFER_MINUTES[mode];
+    let duration = 0;
+    legs.forEach(lg => {
+      const s = lg.segments;
+      duration += (utcOf(s[s.length-1].arrival_time) - utcOf(s[0].departure_time)) / 60000 + buffer;
+    });
+
+    const stops = Math.max(...legs.map(l => l.stops));
+    const carrier = legs[0].carrier;
+    const kmTotal = legs.reduce((a,l) => a + l.dist, 0) * (1 + stops*0.12);
+
+    const base = { air: 26 + kmTotal*0.088, rail: 11 + kmTotal*0.079, bus: 5 + kmTotal*0.037 }[mode];
+    let price = base * (0.72 + rng()*0.95) * cabinMult;
+    if (LOWCOST.has(carrier)) price *= 0.82;
+    if (stops === 0) price *= 1.14;
+    if (mode !== 'air' && params.cabin === 'business') price *= 0.7;
+    price = Math.round(price * params.pax * 100) / 100;
+
+    const f = CONFIG.CO2_FACTORS[mode];
+    const co2 = f == null ? null : Math.round(kmTotal * f * params.pax * 10) / 10;
+
+    offers.push({
+      id: `${mode}-${i}-${hash(seed + i).toString(36)}`,
+      mode, price, currency: CONFIG.CURRENCY,
+      segments,
+      duration_total_minutes: Math.round(duration),
+      stops_count: stops,
+      co2_kg: co2,
+      booking_url: 'https://duckduckgo.com/?q=' + encodeURIComponent(
+        `${carrier} ${params.legs[0].from} ${params.legs[0].to} ${params.legs[0].date}`),
+      provider_name: carrier
+    });
+  }
+  return offers;
+}
+
+function mockProvider(mode){
+  return {
+    name: MODE_LABEL[mode],
+    search(params){
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          if (state.fail[mode]) return reject(new Error('El proveedor no responde (502)'));
+          resolve(makeOffers(params, mode));
+        }, CONFIG.LATENCY_MS[mode] + Math.random()*250);
+      });
+    }
+  };
+}
+
+/* ---- Adaptador Travelpayouts / Aviasales (Data API) -> Offer[] ----------------------
+   Amadeus Self-Service se apagó el 17 de julio de 2026: portal decomisionado y claves
+   desactivadas. El registro de nuevos usuarios llevaba meses pausado. Ese camino ya no
+   existe, así que este adaptador lo sustituye.
+
+   Qué da esta API: precios REALES, gratis, con token instantáneo al registrarse en
+   Travelpayouts. Qué NO da:
+   - Son precios de CACHÉ (búsquedas de usuarios de Aviasales, hasta 7 días guardadas),
+     no una búsqueda en vivo. Pueden estar caducados.
+   - Agrupa por fecha: para un día concreto devuelve el más barato por combinación, no
+     el listado de salidas del día. El filtro horario se queda casi sin material.
+   - No desglosa tramos ni da hora de llegada ni aeropuertos de escala. La llegada se
+     calcula sumando duration_to a la salida, y la oferta se marca con
+     segments_unavailable para que el detalle lo diga en vez de fingir un itinerario.
+   - No entiende de clase ni de número de pasajeros: el precio es por billete. Aquí se
+     multiplica por los pasajeros y se marca como estimación.
+   Por eso el modo mock sigue siendo el modo por defecto para trabajar la UI. */
+// La Data API solo devuelve el código IATA de la aerolínea. Los más habituales en Europa
+// se traducen a nombre; el resto se queda con el código en vez de inventarse una marca.
+const AIRLINE_NAMES = { IB:'Iberia', VY:'Vueling', FR:'Ryanair', UX:'Air Europa', I2:'Iberia Express',
+  LH:'Lufthansa', AF:'Air France', KL:'KLM', BA:'British Airways', AZ:'ITA Airways', U2:'easyJet',
+  W6:'Wizz Air', TP:'TAP Air Portugal', SN:'Brussels Airlines', OS:'Austrian', LX:'SWISS',
+  EW:'Eurowings', TO:'Transavia France', HV:'Transavia', V7:'Volotea', NT:'Binter', YW:'Air Nostrum' };
+
+function offsetOfIso(iso){                       // '...+02:00' -> 120 ; '...-05:30' -> -330
+  const sign = iso[19] === '-' ? -1 : 1;
+  return sign * ((+iso.slice(20,22))*60 + (+iso.slice(23,25)));
+}
+function terminalFromIata(iata, off){
+  const city = BY_IATA[iata];
+  return { code: iata, name: city ? CITIES[city].air[1] : iata, city: city || iata, off };
+}
+
+function normalizeTravelpayouts(json, params){
+  const roundTrip = params.legs.length > 1;
+  const buffer = CONFIG.ACCESS_BUFFER_MINUTES.air;
+  const offers = [];
+
+  (json.data || []).forEach((t, i) => {
+    const dep = t.departure_at, durTo = t.duration_to || t.duration;
+    if (!dep || !durTo) return;                   // sin hora o sin duración no hay nada que colocar
+
+    const oIata = t.origin_airport || t.origin, dIata = t.destination_airport || t.destination;
+    const airlineName = AIRLINE_NAMES[t.airline] || t.airline || 'Aerolínea';
+    const oOff = offsetOfIso(dep);
+    const known = offsetDeIata(dIata, utcOf(dep));
+    const dOff = known != null ? known : oOff;    // sin tabla, se asume la zona del origen
+    const guessed = known == null;
+
+    const segments = [{
+      leg: 0,
+      origin: terminalFromIata(oIata, oOff), destination: terminalFromIata(dIata, dOff),
+      departure_time: dep, arrival_time: isoAt(utcOf(dep) + durTo*60000, dOff),
+      carrier: airlineName, carrier_code: t.flight_number ? (t.airline || '') + t.flight_number : null,
+      vehicle_type: null                            // la API no dice qué avión es: no se rellena
+    }];
+    let duration = durTo + buffer;
+    let stops = t.transfers || 0;
+
+    if (roundTrip && t.return_at && t.duration_back){
+      const rOff = offsetDeIata(dIata, utcOf(t.return_at)) ?? offsetOfIso(t.return_at);
+      segments.push({
+        leg: 1,
+        origin: terminalFromIata(dIata, rOff), destination: terminalFromIata(oIata, oOff),
+        departure_time: t.return_at,
+        arrival_time: isoAt(utcOf(t.return_at) + t.duration_back*60000, oOff),
+        carrier: airlineName, carrier_code: null,     // no da el número del vuelo de vuelta
+        vehicle_type: null
+      });
+      duration += t.duration_back + buffer;
+      stops = Math.max(stops, t.return_transfers || 0);
+    }
+
+    // CO2 solo si conocemos las dos ciudades; si no, se omite en vez de inventarlo.
+    const a = BY_IATA[oIata], b = BY_IATA[dIata];
+    const km = a && b ? haversine(CITIES[a], CITIES[b]) * (roundTrip ? 2 : 1) : null;
+
+    offers.push({
+      id: `tp-${i}-${t.airline || ''}${t.flight_number || ''}`,
+      mode: 'air',
+      price: Math.round(t.price * params.pax * 100) / 100,
+      currency: (json.currency || CONFIG.CURRENCY).toUpperCase(),
+      segments,
+      duration_total_minutes: duration,
+      stops_count: stops,
+      co2_kg: km ? Math.round(km * CONFIG.CO2_FACTORS.air * params.pax * 10) / 10 : null,
+      leg_stops: [t.transfers || 0, t.return_transfers || 0],   // el proveedor las cuenta pero no las detalla
+      booking_url: t.link
+        ? 'https://www.aviasales.com' + (t.link.startsWith('/search') ? t.link : '/search' + t.link)
+        : 'https://www.aviasales.com',
+      provider_name: airlineName,
+      segments_unavailable: true,
+      price_is_estimate: params.pax > 1,
+      tz_guessed: guessed
+    });
+  });
+  return offers;
+}
+
+const travelpayoutsProvider = {
+  name: 'Aviasales',
+  async search(params){
+    if (state.fail.air) throw new Error('El proveedor no responde (502)');
+    if (params.legs.length > 2) throw new Error('Esta API no cubre multidestino');
+    const L = params.legs[0];
+    const oneWay = params.legs.length === 1;
+    const q = new URLSearchParams({
+      origin: CITIES[L.from].iata, destination: CITIES[L.to].iata,
+      departure_at: L.date, one_way: String(oneWay), direct: 'false',
+      currency: CONFIG.CURRENCY.toLowerCase(), market: CONFIG.MARKET,
+      limit: '100', sorting: 'price'
+    });
+    if (!oneWay) q.set('return_at', params.legs[1].date);
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    let r;
+    try { r = await fetch(`${CONFIG.PROXY_URL}/flights?${q}`, { signal: ctrl.signal }); }
+    catch (e) { throw new Error(e.name === 'AbortError' ? 'El proxy ha tardado demasiado' : 'No se llega al proxy'); }
+    finally { clearTimeout(timer); }
+
+    if (!r.ok) throw new Error(`El proxy respondió ${r.status}`);
+    const j = await r.json();
+    if (j.success === false) throw new Error(j.error || 'La API ha devuelto un error');
+    return normalizeTravelpayouts(j, params);      // caché vacía = cero ofertas, no un error
+  }
+};
+
+/* Tren y bus: no hay alta self-service. Renfe, Alsa, FlixBus, Trenitalia y los
+   agregadores (Omio, Trainline, Distribusion) reparten acceso por acuerdo comercial.
+   El día que haya acceso real se sustituye este objeto y nada más: la UI, los filtros
+   y el modelo de datos no se enteran. */
+function providerFor(mode){
+  if (mode === 'air' && CONFIG.MODE === 'live' && CONFIG.PROXY_URL) return travelpayoutsProvider;
+  return mockProvider(mode);
+}
+
+/* =====================================================================================
+   6. ESTADO
+   ===================================================================================== */
+const state = {
+  modes: { air:true, rail:true, bus:true },
+  trip: 'round',
+  legs: [ {from:'Madrid', to:'Barcelona', date:''}, {from:'Barcelona', to:'Madrid', date:''} ],
+  pax: 1, cabin: 'economy',
+  time: { exact:'', depOn:false, dep:[360,720], arrOn:false, arr:[720,1425] },
+  searched: null,                       // copia congelada de los parámetros usados
+  results: {},                          // { air:{status,offers,error}, ... }
+  filters: { maxStops:null, carriers:[], places:[], maxDuration:null, maxPrice:null },
+  draft: null,
+  sort: 'best',
+  fail: { air:false, rail:false, bus:false }
+};
+
+/* =====================================================================================
+   7. FILTRADO, ORDEN Y MÉTRICAS
+   ===================================================================================== */
+const legSegs   = (o, li) => o.segments.filter(s => s.leg === li);
+const outbound  = o => legSegs(o, 0);
+const depIso    = o => outbound(o)[0].departure_time;
+const arrIso    = o => { const s = outbound(o); return s[s.length-1].arrival_time; };
+const legCount  = o => Math.max(...o.segments.map(s => s.leg)) + 1;
+
+function legDuration(o, li){
+  const s = legSegs(o, li);
+  return (utcOf(s[s.length-1].arrival_time) - utcOf(s[0].departure_time)) / 60000;
+}
+// Puerta a puerta de UN trayecto. duration_total_minutes es la suma de todos: en ida y vuelta
+// sumar las dos direcciones es correcto para ordenar, pero mostrarlo junto a los horarios de
+// la ida a secas se lee como un error. Por eso la tarjeta usa esto y el total va aparte.
+const d2dLeg = (o, li) => legDuration(o, li) + CONFIG.ACCESS_BUFFER_MINUTES[o.mode];
+
+function proximity(o){
+  const t = state.searched && state.searched.time.exact;
+  if (!t) return null;
+  const want = (+t.slice(0,2))*60 + (+t.slice(3,5));
+  return localMin(depIso(o)) - want;      // minutos de desfase, con signo
+}
+function fetchedOffers(){
+  return Object.keys(state.results)
+    .filter(m => state.results[m].status === 'ok')
+    .flatMap(m => state.results[m].offers);
+}
+/* Filtro horario duro. Opera sobre hora local del punto correspondiente:
+   salida = hora local del origen, llegada = hora local del destino. Solo trayecto de ida. */
+function passesTime(o, T){
+  if (T.depOn){ const m = localMin(depIso(o)); if (m < T.dep[0] || m > T.dep[1]) return false; }
+  if (T.arrOn){
+    const a = arrIso(o);
+    if (localDay(a) !== localDay(depIso(o))) return false;   // llega al día siguiente: fuera
+    const m = localMin(a); if (m < T.arr[0] || m > T.arr[1]) return false;
+  }
+  return true;
+}
+function passesFilters(o, f){
+  if (f.maxStops    != null && o.stops_count > f.maxStops) return false;
+  if (f.maxDuration != null && o.duration_total_minutes > f.maxDuration) return false;
+  if (f.maxPrice    != null && o.price > f.maxPrice) return false;
+  if (f.carriers.length && !f.carriers.includes(o.provider_name)) return false;
+  if (f.places.length){
+    const codes = new Set(o.segments.flatMap(s => [s.origin.code, s.destination.code]));
+    if (!f.places.some(c => codes.has(c))) return false;
+  }
+  return true;
+}
+function timeFiltered(){
+  const T = (state.searched || state).time;
+  return fetchedOffers().filter(o => passesTime(o, T));
+}
+function visibleOffers(f = state.filters){
+  return sortOffers(timeFiltered().filter(o => passesFilters(o, f)));
+}
+function sortOffers(list){
+  const arr = list.slice();
+  const minP = Math.min(...arr.map(o => o.price)) || 1;
+  const minD = Math.min(...arr.map(o => o.duration_total_minutes)) || 1;
+  const B = CONFIG.BEST;
+  const score = o => o.price/minP*B.priceWeight + o.duration_total_minutes/minD*B.durationWeight
+                     + o.stops_count*B.stopPenalty;
+  const by = {
+    best:      (a,b) => score(a) - score(b),
+    price:     (a,b) => a.price - b.price,
+    duration:  (a,b) => a.duration_total_minutes - b.duration_total_minutes,
+    departure: (a,b) => localMin(depIso(a)) - localMin(depIso(b)),
+    proximity: (a,b) => Math.abs(proximity(a)||0) - Math.abs(proximity(b)||0)
+  }[state.sort] || (()=>0);
+  return arr.sort(by);
+}
+
+/* =====================================================================================
+   8. RENDER — formulario
+   ===================================================================================== */
+function todayISO(d=0){ const t=new Date(); t.setDate(t.getDate()+d); return t.toISOString().slice(0,10); }
+
+function renderLegs(){
+  const box = $('#legs');
+  const multi = state.trip === 'multi';
+  box.innerHTML = state.legs.map((L,i) => `
+    <div class="leg-row ${multi?'multi':''}" data-i="${i}">
+      ${multi ? `<div style="grid-column:1/-1" class="lbl">Trayecto ${i+1}</div>` : ''}
+      <div class="field ac">
+        <label class="lbl" for="from${i}">Desde</label>
+        <input id="from${i}" value="${esc(L.from)}" data-f="from" autocomplete="off" placeholder="Ciudad o código"
+          role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="ac-from${i}">
+        <ul class="ac-list" id="ac-from${i}" role="listbox" aria-label="Ciudades" hidden></ul>
+      </div>
+      <div style="display:flex;align-items:flex-end;justify-content:center">
+        <button type="button" class="swap" data-swap="${i}" aria-label="Intercambiar origen y destino">⇄</button>
+      </div>
+      <div class="field ac">
+        <label class="lbl" for="to${i}">Hasta</label>
+        <input id="to${i}" value="${esc(L.to)}" data-f="to" autocomplete="off" placeholder="Ciudad o código"
+          role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="ac-to${i}">
+        <ul class="ac-list" id="ac-to${i}" role="listbox" aria-label="Ciudades" hidden></ul>
+      </div>
+      <div class="field">
+        <label class="lbl" for="date${i}">${multi ? 'Fecha' : (i ? 'Vuelta' : 'Ida')}</label>
+        <input id="date${i}" type="date" value="${L.date}" min="${todayISO()}" data-f="date">
+      </div>
+      ${multi && state.legs.length > 2 ? `<button type="button" class="link-btn" data-del="${i}"
+        style="grid-column:1/-1;text-align:left;color:var(--err)">Quitar trayecto ${i+1}</button>` : ''}
+    </div>`).join('');
+  $('#addLeg').hidden = !multi || state.legs.length >= 4;
+  $$('#legs input[role="combobox"]').forEach(montarAutocompletado);
+}
+
+/* --- Autocompletado de ciudades -----------------------------------------------------
+   Un <datalist> valdría con veinte ciudades. Con casi doscientas no: no busca sin
+   acentos, no reconoce "London" por "Londres" ni "BCN" por Barcelona, y en móvil se
+   comporta distinto en cada navegador. Esto es un combobox de manual: teclado completo,
+   roles ARIA y coincidencia tolerante. */
+function montarAutocompletado(input){
+  if (input.dataset.ac) return;
+  input.dataset.ac = '1';
+  const lista = $('#' + input.getAttribute('aria-controls'));
+  let idx = -1, opciones = [];
+
+  const cerrar = () => {
+    lista.hidden = true; input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant'); idx = -1;
+  };
+  const marcar = n => {
+    idx = n;
+    $$('li', lista).forEach((li, k) => li.setAttribute('aria-selected', String(k === n)));
+    if (n >= 0){
+      const li = $$('li', lista)[n];
+      input.setAttribute('aria-activedescendant', li.id);
+      li.scrollIntoView && li.scrollIntoView({ block:'nearest' });
+    }
+  };
+  const elegir = nombre => { input.value = nombre; cerrar(); input.dispatchEvent(new Event('change', {bubbles:true})); };
+
+  const abrir = () => {
+    opciones = buscarCiudades(input.value, 8);
+    if (!opciones.length){
+      lista.innerHTML = `<li class="ac-empty" role="presentation">Ninguna ciudad coincide. Prueba con el nombre en otro idioma o con el código IATA.</li>`;
+    } else {
+      lista.innerHTML = opciones.map((n, k) => {
+        const c = CITIES[n];
+        return `<li id="${lista.id}-${k}" role="option" aria-selected="false" data-n="${esc(n)}">
+          <b>${esc(n)}</b><em>${esc(c.cc)}</em><span>${esc(c.iata)}</span></li>`;
+      }).join('');
+    }
+    lista.hidden = false; input.setAttribute('aria-expanded', 'true'); marcar(-1);
+  };
+
+  input.addEventListener('input', abrir);
+  input.addEventListener('focus', abrir);
+  input.addEventListener('blur', () => setTimeout(() => {
+    cerrar();
+    const c = resolverCiudad(input.value);      // "london" o "BCN" quedan como el nombre real
+    if (c) input.value = c;
+  }, 130));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+      e.preventDefault();
+      if (lista.hidden) return abrir();
+      if (!opciones.length) return;
+      marcar((idx + (e.key === 'ArrowDown' ? 1 : opciones.length - 1)) % opciones.length);
+    } else if (e.key === 'Enter'){
+      if (!lista.hidden && idx >= 0){ e.preventDefault(); elegir(opciones[idx]); }
+    } else if (e.key === 'Escape'){
+      if (!lista.hidden){ e.stopPropagation(); cerrar(); }
+    }
+  });
+  lista.addEventListener('mousedown', e => {
+    const li = e.target.closest('li[data-n]');
+    if (li){ e.preventDefault(); elegir(li.dataset.n); }
+  });
+}
+
+function renderRuler(key){
+  const box = $(`#${key}Ruler`);
+  const [lo, hi] = $$('input[type=range]', box);
+  const [a, b] = state.time[key];
+  lo.value = a; hi.value = b;
+  const f = $('.fill', box);
+  f.style.left  = (a/1440*100) + '%';
+  f.style.width = ((b-a)/1440*100) + '%';
+  const on = state.time[key + 'On'];
+  f.style.opacity = on ? .85 : .22;
+  box.style.opacity = on ? 1 : .55;
+  lo.disabled = hi.disabled = !on;
+  $(`#${key}Val`).textContent = `${hhmm(a)} – ${hhmm(b)}`;
+  if (!$('.tick', box)){
+    [0,6,12,18,24].forEach(h => {
+      const t = document.createElement('div'); t.className='tick'; t.style.left = (h/24*100)+'%';
+      const l = document.createElement('div'); l.className='tick-lbl'; l.style.left=(h/24*100)+'%';
+      l.textContent = h===24 ? '24' : pad(h);
+      box.append(t,l);
+    });
+  }
+}
+
+// Las franjas son filtro de cliente: si se tocan con resultados en pantalla, se aplican al
+// momento sobre la búsqueda ya hecha. No hay que volver a buscar para abrir o cerrar una franja.
+function syncTime(){
+  if (!state.searched) return;
+  state.searched.time = JSON.parse(JSON.stringify(state.time));
+  render();
+}
+
+function wireRuler(key){
+  const box = $(`#${key}Ruler`);
+  const [lo, hi] = $$('input[type=range]', box);
+  const STEP = 15;
+  const sync = () => { renderRuler(key); syncTime(); };
+  lo.addEventListener('input', () => {
+    let v = +lo.value;
+    if (v > +hi.value - STEP) v = +hi.value - STEP;        // el bajo nunca pasa al alto
+    state.time[key][0] = clamp(v, 0, 1440 - STEP); sync();
+  });
+  hi.addEventListener('input', () => {
+    let v = +hi.value;
+    if (v < +lo.value + STEP) v = +lo.value + STEP;        // ni el alto por debajo del bajo
+    state.time[key][1] = clamp(v, STEP, 1440); sync();
+  });
+}
+
+/* =====================================================================================
+   9. RENDER — resultados
+   ===================================================================================== */
+function modeChip(m, r){
+  const s = r ? r.status : 'idle';
+  let txt = { loading:'buscando…', error: r && r.error }[s] || '';
+  let est = s;
+  if (s === 'ok'){
+    if (r.offers.length) txt = `${r.offers.length} opciones`;
+    else { est = 'vacio'; txt = motivoSinCobertura(m); }
+  }
+  return `<div class="pv" data-s="${est}"><span class="dot"></span>${MODE_LABEL[m]}
+    <small>${esc(txt)}</small></div>`;
+}
+// Por qué un modo no devuelve nada. Un "0 opciones" a secas parece un fallo y no lo es.
+function motivoSinCobertura(mode){
+  const legs = state.searched.legs;
+  if (mode !== 'air'){
+    if (legs.some(L => CITIES[L.from].land !== CITIES[L.to].land)) return 'sin conexión terrestre';
+    if (legs.some(L => haversine(CITIES[L.from], CITIES[L.to]) > CONFIG.MAX_DISTANCE_KM[mode]))
+      return 'ruta demasiado larga';
+  } else if (legs.some(L => haversine(CITIES[L.from], CITIES[L.to]) < 180)) {
+    return 'trayecto demasiado corto';
+  }
+  return 'sin resultados';
+}
+
+function offerCard(o){
+  const dep = depIso(o), arr = arrIso(o);
+  const nextDay = localDay(arr) !== localDay(dep);
+  const p = proximity(o);
+  const legs = legCount(o);
+  // Los horarios de la tarjeta son los de la ida, así que las escalas también.
+  // stops_count (máximo de todos los trayectos) es lo que usan los filtros, no esta línea.
+  const oStops = o.leg_stops ? o.leg_stops[0] : outbound(o).length - 1;
+  const stopsTxt = oStops === 0 ? 'Directo'
+    : `${oStops} ${o.mode === 'air' ? (oStops===1?'escala':'escalas') : (oStops===1?'transbordo':'transbordos')}`;
+  const T = state.searched.time;
+  const win = T.depOn ? `<div class="m-win" style="left:${T.dep[0]/1440*100}%;width:${(T.dep[1]-T.dep[0])/1440*100}%"></div>` : '';
+  const mark = T.exact ? `<div class="m-mark" style="left:${(((+T.exact.slice(0,2))*60+(+T.exact.slice(3,5)))/1440*100)}%"></div>` : '';
+  const dots = Array.from({length:oStops}, (_,i) =>
+    `<i style="left:${(i+1)/(oStops+1)*100}%"></i>`).join('');
+
+  return `<article class="card" data-id="${o.id}">
+    <div class="card-top">
+      <span class="badge" data-m="${o.mode}">${MODE_LABEL[o.mode]}</span>
+      <span class="carrier">${esc(o.provider_name)} · ${esc(outbound(o)[0].carrier_code || '')}</span>
+      <span class="price"><b>${fmtEur(o.price)}</b><small>${state.searched.pax > 1 ? state.searched.pax + ' pasajeros' : 'total'}</small></span>
+    </div>
+    <div class="times">
+      <div class="t"><b>${fmtTime(dep)}</b><span>${esc(outbound(o)[0].origin.code)}</span></div>
+      <div class="mid">
+        <div class="dur">${fmtMin(legDuration(o,0))}</div>
+        <div class="bar">${dots}</div>
+        <div class="stops">${stopsTxt}</div>
+      </div>
+      <div class="t arr"><b>${fmtTime(arr)}${nextDay?'<span class="plus1">+1</span>':''}</b>
+        <span>${esc(outbound(o)[outbound(o).length-1].destination.code)}</span></div>
+    </div>
+    <div class="mini">
+      <div class="m-track"></div>${win}${mark}
+      <div class="m-dot" data-m="${o.mode}" style="left:${localMin(dep)/1440*100}%"></div>
+    </div>
+    <div class="card-bottom">
+      ${p !== null ? `<span class="delta ${p===0?'zero':''}">${p>0?'+':''}${p} min</span>` : ''}
+      <span class="meta"><span class="d2d">${legs > 1
+          ? `Ida ${fmtMin(d2dLeg(o,0))} puerta a puerta · ${legs} trayectos, ${fmtMin(o.duration_total_minutes)} en total`
+          : `Puerta a puerta ${fmtMin(d2dLeg(o,0))}`}</span>
+        ${o.co2_kg != null ? ` · ≈ ${o.co2_kg} kg CO₂` : ''}</span>
+      <span class="actions">
+        <button class="btn small" data-detail="${o.id}">Ver detalle</button>
+        <a class="btn small" href="${o.booking_url}" target="_blank" rel="noopener"
+           style="text-decoration:none">Reservar ↗</a>
+      </span>
+    </div>
+  </article>`;
+}
+
+function renderResults(){
+  const R = $('#results');
+  if (!state.searched){ R.hidden = true; return; }
+  R.hidden = false;
+
+  const active = Object.keys(state.searched.modes).filter(m => state.searched.modes[m]);
+  const live = CONFIG.MODE === 'live' && CONFIG.PROXY_URL && state.searched.modes.air;
+  $('#strip').innerHTML = active.map(m => modeChip(m, state.results[m])).join('') +
+    (live ? `<p class="note-strip" style="flex:1 1 100%;margin:4px 0 0">Vuelos: precios reales
+      de la caché de Aviasales (hasta 7 días de antigüedad), el más barato por fecha. No es el
+      listado de salidas del día. Tren y bus siguen simulados.</p>` : '');
+
+  const loading = active.some(m => !state.results[m] || state.results[m].status === 'loading');
+  const all = fetchedOffers();
+  const afterTime = timeFiltered();
+  const list = visibleOffers();
+  const cut = all.length - afterTime.length;
+
+  $('#resCount').textContent = loading
+    ? 'Buscando…'
+    : `${list.length} ${list.length === 1 ? 'opción' : 'opciones'}` +
+      (all.length !== list.length ? ` de ${all.length}` : '');
+
+  // chips de filtros activos, incluidas las franjas horarias
+  const chips = [];
+  const T = state.searched.time;
+  if (T.exact) chips.push(['exact', `Salida ideal ${T.exact}`]);
+  if (T.depOn) chips.push(['dep', `Sale ${hhmm(T.dep[0])}–${hhmm(T.dep[1])}`]);
+  if (T.arrOn) chips.push(['arr', `Llega ${hhmm(T.arr[0])}–${hhmm(T.arr[1])}`]);
+  const f = state.filters;
+  if (f.maxStops != null) chips.push(['maxStops', f.maxStops === 0 ? 'Solo directos' : `Hasta ${f.maxStops} escalas`]);
+  if (f.maxDuration != null) chips.push(['maxDuration', `Máx ${fmtMin(f.maxDuration)}`]);
+  if (f.maxPrice != null) chips.push(['maxPrice', `Máx ${fmtEur(f.maxPrice)}`]);
+  f.carriers.forEach(c => chips.push(['carrier:' + c, c]));
+  f.places.forEach(c => chips.push(['place:' + c, c]));
+  $('#chips').innerHTML = chips.map(([k, t]) =>
+    `<span class="chip">${esc(t)}<button data-chip="${esc(k)}" aria-label="Quitar ${esc(t)}">✕</button></span>`).join('');
+
+  const L = $('#list');
+  let html = list.map(offerCard).join('');
+
+  if (loading) html += '<div class="skel"></div><div class="skel"></div>';
+
+  if (!loading && !list.length){
+    if (cut > 0 && afterTime.length === 0){
+      html = `<div class="panel empty"><h3>Tus franjas horarias dejan la lista vacía</h3>
+        <p>Se han descartado ${cut} ${cut===1?'opción que no encaja':'opciones que no encajan'} en tus franjas.
+           Ábrelas al día completo y las recuperas.</p>
+        <button class="btn" id="widen">Abrir las franjas al día completo</button></div>`;
+    } else if (afterTime.length > 0){
+      html = `<div class="panel empty"><h3>Ningún resultado pasa los filtros</h3>
+        <p>Hay ${afterTime.length} ${afterTime.length===1?'opción':'opciones'} esperando detrás de los filtros que has puesto.</p>
+        <button class="btn" id="clearAll">Quitar los filtros</button></div>`;
+    } else {
+      const failed = active.filter(m => state.results[m] && state.results[m].status === 'error');
+      html = `<div class="panel empty"><h3>Sin resultados para esta ruta</h3>
+        <p>${failed.length ? 'Alguno de los proveedores no ha respondido. Vuelve a lanzar la búsqueda o desactiva ese modo.'
+          : 'Ningún proveedor cubre este trayecto. El tren y el bus necesitan tierra continua y una distancia razonable; el avión no opera saltos muy cortos.'}</p>
+        <button class="btn" id="retry">Buscar otra vez</button></div>`;
+    }
+  }
+  L.innerHTML = html;
+}
+
+/* =====================================================================================
+   10. RENDER — panel de filtros (con recuento antes de aplicar)
+   ===================================================================================== */
+function countWith(mod){
+  const f = { ...state.draft, ...mod };
+  return timeFiltered().filter(o => passesFilters(o, f)).length;
+}
+function renderFilterPanel(){
+  const base = timeFiltered();
+  if (!base.length){ $('#filterBody').innerHTML = '<p style="color:var(--muted)">Nada que filtrar todavía.</p>'; return; }
+  const d = state.draft;
+  const maxStops   = Math.max(...base.map(o => o.stops_count));
+  const carriers   = [...new Set(base.map(o => o.provider_name))].sort();
+  const places     = [...new Set(base.flatMap(o => o.segments.flatMap(s => [
+                        s.origin.code + '|' + s.origin.name, s.destination.code + '|' + s.destination.name])))].sort();
+  const durMax     = Math.max(...base.map(o => o.duration_total_minutes));
+  const durMin     = Math.min(...base.map(o => o.duration_total_minutes));
+  const prMax      = Math.ceil(Math.max(...base.map(o => o.price)));
+  const prMin      = Math.floor(Math.min(...base.map(o => o.price)));
+
+  const stopOpts = Array.from({length: maxStops + 1}, (_,i) => {
+    const n = countWith({ maxStops:i });
+    return `<label class="opt ${n?'':'off'}"><input type="radio" name="stops" value="${i}"
+      ${d.maxStops===i?'checked':''}> ${i===0?'Solo directos':`Hasta ${i} ${i===1?'escala/transbordo':'escalas/transbordos'}`}
+      <span class="n">${n}</span></label>`;
+  }).join('');
+
+  $('#filterBody').innerHTML = `
+    <div class="fgroup"><h4>Escalas y transbordos</h4>
+      <label class="opt"><input type="radio" name="stops" value="" ${d.maxStops==null?'checked':''}>
+        Todas <span class="n">${countWith({maxStops:null})}</span></label>
+      ${stopOpts}
+    </div>
+    <div class="fgroup"><h4>Precio máximo</h4>
+      <input class="slider-simple" type="range" id="fPrice" min="${prMin}" max="${prMax}"
+        step="1" value="${d.maxPrice ?? prMax}">
+      <div class="kv"><span id="fPriceLbl">${fmtEur(d.maxPrice ?? prMax)}</span>
+        <b id="fPriceN">${countWith({maxPrice:d.maxPrice})} resultados</b></div>
+    </div>
+    <div class="fgroup"><h4>Duración puerta a puerta</h4>
+      <input class="slider-simple" type="range" id="fDur" min="${Math.floor(durMin)}" max="${Math.ceil(durMax)}"
+        step="5" value="${d.maxDuration ?? Math.ceil(durMax)}">
+      <div class="kv"><span id="fDurLbl">${fmtMin(d.maxDuration ?? durMax)}</span>
+        <b id="fDurN">${countWith({maxDuration:d.maxDuration})} resultados</b></div>
+    </div>
+    <div class="fgroup"><h4>Operadores</h4>
+      ${carriers.map(c => {
+        const n = countWith({ carriers:[c] });
+        return `<label class="opt ${n?'':'off'}"><input type="checkbox" data-carrier="${esc(c)}"
+          ${d.carriers.includes(c)?'checked':''}> ${esc(c)} <span class="n">${n}</span></label>`;
+      }).join('')}
+    </div>
+    <div class="fgroup"><h4>Aeropuertos y estaciones</h4>
+      ${places.map(p => { const [code,name] = p.split('|');
+        const n = countWith({ places:[code] });
+        return `<label class="opt ${n?'':'off'}"><input type="checkbox" data-place="${esc(code)}"
+          ${d.places.includes(code)?'checked':''}> ${esc(name)} <span class="n">${n}</span></label>`;
+      }).join('')}
+    </div>`;
+  $('#applyFilters').textContent = `Ver ${countWith({})} resultados`;
+}
+
+/* =====================================================================================
+   11. RENDER — detalle
+   ===================================================================================== */
+function renderDetail(id){
+  const o = fetchedOffers().find(x => x.id === id);
+  if (!o) return;
+  const legs = legCount(o);
+  const names = ['Ida','Vuelta','Trayecto 3','Trayecto 4'];
+  let html = '';
+  for (let li=0; li<legs; li++){
+    const segs = legSegs(o, li);
+    if (legs > 1) html += `<p class="leg-title">${names[li]} · ${segs[0].departure_time.slice(8,10)}/${segs[0].departure_time.slice(5,7)}</p>`;
+    segs.forEach((s, i) => {
+      if (i > 0){
+        const w = (utcOf(s.departure_time) - utcOf(segs[i-1].arrival_time)) / 60000;
+        html += `<div class="layover">↕ Conexión de ${fmtMin(w)} en ${esc(s.origin.city)}</div>`;
+      }
+      html += `<div class="seg-row">
+        <div class="tcol">${fmtTime(s.departure_time)}<span>${fmtTime(s.arrival_time)}</span></div>
+        <div class="body">
+          <b>${esc(s.origin.name)} <span style="color:var(--muted)">(${esc(s.origin.code)})</span></b>
+          <b>${esc(s.destination.name)} <span style="color:var(--muted)">(${esc(s.destination.code)})</span></b>
+          <span>${[ [s.carrier, s.carrier_code].filter(Boolean).join(' '), s.vehicle_type,
+            fmtMin((utcOf(s.arrival_time)-utcOf(s.departure_time))/60000) ]
+            .filter(Boolean).map(esc).join(' · ')}</span>
+        </div></div>`;
+    });
+    html += `<div class="kv" style="border-top:1px solid var(--line-soft);margin-top:6px;padding-top:8px">
+      <span>Duración del vehículo</span><b>${fmtMin(legDuration(o,li))}</b></div>`;
+  }
+  const buffer = CONFIG.ACCESS_BUFFER_MINUTES[o.mode] * legs;
+  html += `<hr class="sep">
+    <div class="kv"><span>Margen de acceso (${MODE_LABEL[o.mode].toLowerCase()}, ${legs>1?legs+' trayectos':'ida'})</span><b>+${fmtMin(buffer)}</b></div>
+    <div class="kv"><span>Total puerta a puerta</span><b>${fmtMin(o.duration_total_minutes)}</b></div>
+    <hr class="sep">
+    <div class="kv"><span>Precio por pasajero</span><b>${fmtEur(o.price / state.searched.pax)}</b></div>
+    <div class="kv"><span>Pasajeros</span><b>× ${state.searched.pax}</b></div>
+    <div class="kv" style="font-size:16px;padding-top:6px"><span><b>Total</b></span><b>${fmtEur(o.price)}</b></div>
+    ${o.co2_kg != null ? `<div class="kv"><span>CO₂ estimado</span><b>≈ ${o.co2_kg} kg</b></div>
+      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 0">${esc(CONFIG.CO2_SOURCE)}</p>` :
+      `<p style="font-size:11.5px;color:var(--muted);margin:8px 0 0">Sin estimación de CO₂ para este proveedor: no hay una fuente razonable, así que no se muestra ningún número.</p>`}
+    ${o.segments_unavailable ? `<p class="note-strip" style="margin-top:10px">El proveedor no
+      desglosa los tramos: no hay aeropuertos de escala ni horas de conexión. La llegada está
+      calculada sumando la duración a la hora de salida${o.stops_count ? `, y hay ${o.stops_count}
+      ${o.stops_count===1?'escala':'escalas'} sin detallar` : ''}.</p>` : ''}
+    ${o.price_is_estimate ? `<p class="note-strip" style="margin-top:10px">Precio estimado: la
+      fuente da el precio de un billete y aquí se ha multiplicado por ${state.searched.pax}
+      pasajeros. Una búsqueda real para ${state.searched.pax} plazas puede dar otra cifra.</p>` : ''}
+    ${o.tz_guessed ? `<p class="note-strip" style="margin-top:10px">La hora de llegada usa una zona
+      horaria supuesta: el proveedor no la incluye en la respuesta.</p>` : ''}
+    ${CONFIG.MODE === 'mock' ? `<p class="note-strip" style="margin-top:10px">Datos simulados (modo mock). El botón de reservar abre una búsqueda del operador, no un carrito real.</p>` : ''}`;
+
+  $('#detailBody').innerHTML = html;
+  $('#detailBook').href = o.booking_url;
+  $('#detailBook').textContent = `Reservar en ${o.provider_name} ↗`;
+  openSheet('#detailSheet');
+}
+
+/* =====================================================================================
+   12. BÚSQUEDA
+   ===================================================================================== */
+function readForm(){
+  $$('#legs .leg-row').forEach(row => {
+    const i = +row.dataset.i;
+    ['from','to','date'].forEach(f => {
+      const v = $(`[data-f="${f}"]`, row).value;
+      state.legs[i][f] = f === 'date' ? v : (resolverCiudad(v) || v);
+    });
+  });
+  state.pax = clamp(+$('#pax').value || 1, 1, 9);
+  state.cabin = $('#cabin').value;
+  state.time.exact = $('#exactTime').value;
+}
+function validate(){
+  const need = state.trip === 'oneway' ? 1 : state.legs.length;
+  for (let i=0;i<need;i++){
+    const L = state.legs[i];
+    if (!CITIES[L.from]) return L.from ? `No conozco "${L.from}". Elige una de la lista.`
+                                        : 'Falta el origen del trayecto ' + (i+1) + '.';
+    if (!CITIES[L.to])   return L.to   ? `No conozco "${L.to}". Elige una de la lista.`
+                                        : 'Falta el destino del trayecto ' + (i+1) + '.';
+    if (L.from === L.to) return 'El origen y el destino del trayecto ' + (i+1) + ' son la misma ciudad.';
+    if (!L.date)         return 'Falta la fecha del trayecto ' + (i+1) + '.';
+  }
+  if (!Object.values(state.modes).some(Boolean)) return 'Activa al menos un modo de transporte.';
+  return null;
+}
+function search(){
+  readForm();
+  const err = validate();
+  if (err) return toast(err);
+
+  const legs = state.legs.slice(0, state.trip === 'oneway' ? 1 : state.legs.length)
+                         .map(L => ({ ...L }));
+  state.searched = {
+    modes: { ...state.modes }, legs, pax: state.pax, cabin: state.cabin,
+    time: JSON.parse(JSON.stringify(state.time))
+  };
+  state.filters = { maxStops:null, carriers:[], places:[], maxDuration:null, maxPrice:null };
+  if (state.time.exact) { state.sort = 'proximity'; $('#sortSel').value = 'proximity'; }
+  else if (state.sort === 'proximity') { state.sort = 'best'; $('#sortSel').value = 'best'; }
+
+  state.results = {};
+  Object.keys(state.searched.modes).filter(m => state.searched.modes[m]).forEach(mode => {
+    state.results[mode] = { status:'loading', offers:[] };
+    providerFor(mode).search(state.searched)
+      .then(offers => { state.results[mode] = { status:'ok', offers }; renderResults(); })
+      .catch(e     => { state.results[mode] = { status:'error', offers:[], error:e.message }; renderResults(); });
+  });
+  renderResults();
+  const R = $('#results');
+  if (R.scrollIntoView) R.scrollIntoView({ behavior:'smooth', block:'start' });
+}
+
+/* =====================================================================================
+   13. EVENTOS
+   ===================================================================================== */
+let toastT;
+function toast(msg){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2600);
+}
+function openSheet(sel){ $(sel).hidden = false; requestAnimationFrame(()=>{ $(sel).classList.add('on'); $('#scrim').classList.add('on'); }); }
+function closeSheets(){
+  $('#scrim').classList.remove('on');
+  ['#filterSheet','#detailSheet'].forEach(s => {
+    const el = $(s); el.classList.remove('on');
+    setTimeout(() => { if (!el.classList.contains('on')) el.hidden = true; }, 220);
+  });
+}
+function render(){ renderResults(); }
+
+function init(){
+  state.legs[0].date = todayISO(14);
+  state.legs[1].date = todayISO(18);
+  renderLegs();
+  ['dep','arr'].forEach(k => { renderRuler(k); wireRuler(k); });
+  $('#co2Foot').textContent = 'Las cifras de CO₂ son estimaciones. ' + CONFIG.CO2_SOURCE;
+  $('#modeLine').textContent = CONFIG.MODE === 'mock'
+    ? 'Modo mock: datos simulados, deterministas por ruta y fecha. Sin claves ni red.'
+    : `Modo live: vuelos desde la caché de Aviasales vía ${CONFIG.PROXY_URL}. Tren y bus, simulados.`;
+
+  // modos
+  $('#modes').addEventListener('click', e => {
+    const b = e.target.closest('.mode-btn'); if (!b) return;
+    const m = b.dataset.mode;
+    const on = Object.values(state.modes).filter(Boolean).length;
+    if (state.modes[m] && on === 1){
+      b.classList.remove('shake'); void b.offsetWidth; b.classList.add('shake');
+      return toast('Deja al menos un modo activo.');
+    }
+    state.modes[m] = !state.modes[m];
+    b.setAttribute('aria-pressed', String(state.modes[m]));
+    if (state.searched){
+      state.searched.modes = { ...state.modes };
+      if (state.modes[m] && !state.results[m]) {
+        state.results[m] = { status:'loading', offers:[] };
+        providerFor(m).search(state.searched)
+          .then(o => { state.results[m] = { status:'ok', offers:o }; renderResults(); })
+          .catch(e => { state.results[m] = { status:'error', offers:[], error:e.message }; renderResults(); });
+      }
+      if (!state.modes[m]) delete state.results[m];
+      renderResults();
+    }
+  });
+
+  // tipo de viaje
+  $('#tripType').addEventListener('click', e => {
+    const b = e.target.closest('button[data-trip]'); if (!b) return;
+    readForm();
+    state.trip = b.dataset.trip;
+    $$('#tripType button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    if (state.trip === 'oneway') state.legs = [state.legs[0]];
+    if (state.trip === 'round')  state.legs = [state.legs[0],
+      state.legs[1] || { from: state.legs[0].to, to: state.legs[0].from, date: todayISO(18) }];
+    if (state.trip === 'multi' && state.legs.length < 2) state.legs.push(
+      { from: state.legs[0].to, to: 'Sevilla', date: todayISO(18) });
+    renderLegs();
+  });
+
+  $('#addLeg').addEventListener('click', () => {
+    readForm();
+    const last = state.legs[state.legs.length-1];
+    state.legs.push({ from:last.to, to:'', date:last.date });
+    renderLegs();
+  });
+
+  // Ida y vuelta: la vuelta espeja el trayecto de ida mientras el usuario no la toque.
+  $('#legs').addEventListener('change', e => {
+    if (state.trip !== 'round') return;
+    const f = e.target.dataset && e.target.dataset.f;
+    if (f !== 'from' && f !== 'to') return;
+    const row = e.target.closest('.leg-row');
+    if (!row || +row.dataset.i !== 0) return;
+    readForm();
+    if (state.legs[1].espejo === false) return;
+    state.legs[1].from = state.legs[0].to;
+    state.legs[1].to   = state.legs[0].from;
+    state.legs[1].espejo = true;
+    const r1 = $$('#legs .leg-row')[1];
+    if (r1){
+      $('[data-f="from"]', r1).value = state.legs[1].from;
+      $('[data-f="to"]',   r1).value = state.legs[1].to;
+    }
+  });
+  // ...salvo que el usuario edite la vuelta a mano: entonces deja de espejarse.
+  $('#legs').addEventListener('change', e => {
+    const row = e.target.closest('.leg-row');
+    const f = e.target.dataset && e.target.dataset.f;
+    if (row && +row.dataset.i === 1 && (f === 'from' || f === 'to')) state.legs[1].espejo = false;
+  });
+
+  $('#legs').addEventListener('click', e => {
+    const sw = e.target.closest('[data-swap]');
+    if (sw){ readForm(); const i = +sw.dataset.swap;
+      [state.legs[i].from, state.legs[i].to] = [state.legs[i].to, state.legs[i].from];
+      if (i === 0 && state.trip === 'round' && state.legs[1] && state.legs[1].espejo !== false){
+        state.legs[1].from = state.legs[0].to; state.legs[1].to = state.legs[0].from;
+      }
+      renderLegs(); return; }
+    const del = e.target.closest('[data-del]');
+    if (del){ readForm(); state.legs.splice(+del.dataset.del, 1); renderLegs(); }
+  });
+
+  $('#depOn').addEventListener('change', e => { state.time.depOn = e.target.checked; renderRuler('dep'); syncTime(); });
+  $('#arrOn').addEventListener('change', e => { state.time.arrOn = e.target.checked; renderRuler('arr'); syncTime(); });
+  $('#exactTime').addEventListener('change', e => {
+    state.time.exact = e.target.value;
+    if (!state.searched) return;
+    if (e.target.value && state.sort !== 'proximity'){ state.sort = 'proximity'; $('#sortSel').value = 'proximity'; }
+    if (!e.target.value && state.sort === 'proximity'){ state.sort = 'best'; $('#sortSel').value = 'best'; }
+    syncTime();
+  });
+  $('#searchBtn').addEventListener('click', search);
+  $('#sortSel').addEventListener('change', e => { state.sort = e.target.value; render(); });
+
+  // lista: detalle, vacíos
+  $('#list').addEventListener('click', e => {
+    const d = e.target.closest('[data-detail]');
+    if (d) return renderDetail(d.dataset.detail);
+    if (e.target.id === 'widen'){
+      state.time.depOn = state.time.arrOn = false;
+      state.searched.time.depOn = state.searched.time.arrOn = false;
+      $('#depOn').checked = $('#arrOn').checked = false;
+      renderRuler('dep'); renderRuler('arr'); render();
+      return toast('Franjas abiertas al día completo.');
+    }
+    if (e.target.id === 'clearAll'){
+      state.filters = { maxStops:null, carriers:[], places:[], maxDuration:null, maxPrice:null };
+      return render();
+    }
+    if (e.target.id === 'retry') return search();
+  });
+
+  // chips
+  $('#chips').addEventListener('click', e => {
+    const b = e.target.closest('[data-chip]'); if (!b) return;
+    const k = b.dataset.chip;
+    if (k === 'exact'){ state.time.exact = ''; state.searched.time.exact = ''; $('#exactTime').value = '';
+      if (state.sort === 'proximity'){ state.sort = 'best'; $('#sortSel').value = 'best'; } }
+    else if (k === 'dep' || k === 'arr'){
+      state.time[k+'On'] = false; state.searched.time[k+'On'] = false;
+      $('#'+k+'On').checked = false; renderRuler(k);
+    }
+    else if (k.startsWith('carrier:')) state.filters.carriers = state.filters.carriers.filter(c => c !== k.slice(8));
+    else if (k.startsWith('place:'))   state.filters.places   = state.filters.places.filter(c => c !== k.slice(6));
+    else state.filters[k] = null;
+    render();
+  });
+
+  // filtros
+  $('#openFilters').addEventListener('click', () => {
+    state.draft = JSON.parse(JSON.stringify(state.filters));
+    renderFilterPanel(); openSheet('#filterSheet');
+  });
+  $('#closeFilters').addEventListener('click', closeSheets);
+  $('#closeDetail').addEventListener('click', closeSheets);
+  $('#scrim').addEventListener('click', closeSheets);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheets(); });
+  $('#applyFilters').addEventListener('click', () => { state.filters = state.draft; closeSheets(); render(); });
+  $('#clearFilters').addEventListener('click', () => {
+    state.draft = { maxStops:null, carriers:[], places:[], maxDuration:null, maxPrice:null };
+    renderFilterPanel();
+  });
+  $('#filterBody').addEventListener('change', e => {
+    const t = e.target;
+    if (t.name === 'stops') state.draft.maxStops = t.value === '' ? null : +t.value;
+    else if (t.dataset.carrier){
+      const c = t.dataset.carrier;
+      state.draft.carriers = t.checked ? [...state.draft.carriers, c] : state.draft.carriers.filter(x => x !== c);
+    } else if (t.dataset.place){
+      const c = t.dataset.place;
+      state.draft.places = t.checked ? [...state.draft.places, c] : state.draft.places.filter(x => x !== c);
+    } else return;
+    renderFilterPanel();
+  });
+  $('#filterBody').addEventListener('input', e => {
+    if (e.target.id === 'fPrice'){
+      const max = +e.target.max, v = +e.target.value;
+      state.draft.maxPrice = v >= max ? null : v;
+      $('#fPriceLbl').textContent = fmtEur(v);
+      $('#fPriceN').textContent = countWith({ maxPrice: state.draft.maxPrice }) + ' resultados';
+      $('#applyFilters').textContent = `Ver ${countWith({})} resultados`;
+    }
+    if (e.target.id === 'fDur'){
+      const max = +e.target.max, v = +e.target.value;
+      state.draft.maxDuration = v >= max ? null : v;
+      $('#fDurLbl').textContent = fmtMin(v);
+      $('#fDurN').textContent = countWith({ maxDuration: state.draft.maxDuration }) + ' resultados';
+      $('#applyFilters').textContent = `Ver ${countWith({})} resultados`;
+    }
+  });
+
+  // laboratorio de fallos
+  $$('[data-fail]').forEach(cb => cb.addEventListener('change', e => {
+    state.fail[e.target.dataset.fail] = e.target.checked;
+    toast(e.target.checked
+      ? `El proveedor de ${MODE_LABEL[e.target.dataset.fail].toLowerCase()} fallará en la próxima búsqueda.`
+      : 'Proveedor restablecido.');
+  }));
+
+  // Service worker: ruta relativa a propósito. En GitHub Pages la app cuelga de
+  // /usuario.github.io/repo/, y '/sw.js' apuntaría a la raíz del dominio, que no es tuya.
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+  }
+}
+init();
+</script>
+</body>
+</html>
